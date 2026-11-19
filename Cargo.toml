@@ -10,3 +10,7 @@ license = "MIT"
 # Path dependency while both are developed side by side; switch to the git
 # fork (kill-face/datafusion-sqlparser-rs, bookmark `tsql`) for Nix builds.
 sqlparser = { path = "../datafusion-sqlparser-rs", features = ["visitor"] }
+
+[profile.release]
+lto = true
+codegen-units = 1

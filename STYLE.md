@@ -105,3 +105,61 @@ where the two changes above apply or the file was simply out of style.
 - A batch that doesn't parse is left exactly as written; the rest of the
   file is still formatted. Placeholder templates (`values ();`, `check ()`)
   stay usable.
+
+## Rules
+
+What `tsqlfmt` implements, rule by rule. Each has a golden test in
+`tests/golden/` (input `NN-name.sql`, output `NN-name.expected.sql`). Where a
+rule comes from the test bed rather than the JetBrains scheme, the counts are
+from `corpus/private/` (house style); "keeps" means the author's line break is
+kept, and anything not covered here keeps its source layout, re-indented with
+its surroundings. (So far that's everything but the rules below.)
+
+Formatting is per `GO` batch. Batches that don't parse, `@formatter:off`
+regions, `GO` lines and SQLCMD lines (`:r`, `:setvar`) come out exactly as
+written; so does any batch whose output wouldn't tokenize back to the same
+tokens (the safety net). Line endings (LF / CRLF), a BOM and a missing final
+newline are kept.
+
+### R1 Case (`01-case`)
+
+Keywords, built-in functions, system types and `@@` functions lower-case.
+Identifiers exactly as written, decided by the AST (a word that starts an
+identifier node is one), so `Status`, `Name`, `Value` keep their case; so do
+user-defined functions and types (`dbo.fnCustom`, `dbo.MyType`). Date parts
+in `dateadd`-style functions count as keywords.
+
+```sql
+select [Name], Status, count(*) as Cnt, getdate() as Now, @@rowcount as N
+declare @x nvarchar(max) = convert(varchar(10), 5), @y dbo.MyType, @z sysname
+```
+
+### R3 Statements (`03-statements`)
+
+Each statement starts a line, at the indent of the block it's in; `;` stays
+on the statement's last line; `;with` stays together.
+
+### R4 Blank lines (`04-blank-lines`)
+
+A blank line the author wrote between two lines is kept; runs of blank lines
+become one. No blank lines are added.
+
+### R5 Comments (`05-comments`)
+
+Comments never move relative to the tokens around them. A trailing comment
+stays on its line, as far from the code before it as in the source (so
+aligned comments stay aligned). A comment on its own line keeps its offset
+from the line after it. A comment right after a comma keeps the comma at the
+end of its line (a chopped list can't move that comma to the next line).
+
+```sql
+select a,       -- trailing
+       b        -- another
+from t -- after from
+```
+
+### R27 Formatter control (`26-formatter-off`, `27-unparsed`)
+
+`@formatter:off` … `@formatter:on` lines (both included) are verbatim, also
+inside a statement or across `GO`; the code after them continues at the
+indent it would have.

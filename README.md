@@ -13,12 +13,51 @@ style is in [STYLE.md](STYLE.md).
 - `src/lib.rs`: splits a file into `GO` batches (SQLCMD `:r` / `:setvar`
   lines are skipped), keeping file line numbers, and parses each batch with
   the MS SQL dialect, keeping comments.
+- `src/format.rs`: formats a file: line endings and BOM, `GO` / SQLCMD lines
+  (kept as written), `@formatter:off` regions, one batch at a time; and the
+  safety net (below).
+- `src/layout.rs`: the layout model and printer. A batch is its tokens, the
+  trivia (comments, line breaks) between them, and a rule per gap between two
+  tokens (keep the source's line break / one line / break / break with a
+  group / fill to the margin), with indents relative to tokens printed
+  earlier and alignment columns. The printer only ever writes whitespace
+  between the tokens, so it can't drop or reorder anything.
+- `src/build/`: sets the rules from the AST. Every gap starts as "keep the
+  source layout, re-indented with its surroundings"; so far only top-level
+  statements are placed (each starts a line at column 0).
+- `src/case.rs`: keyword / built-in function / system type case, deciding
+  identifiers by the AST.
+- `src/corpus.rs`: the `corpus` progress measure.
 - `src/main.rs`: the `tsqlfmt` command.
+
+## Formatting
+
+`tsqlfmt [FILE]` formats FILE (or stdin) to stdout. For conform.nvim:
+
+```lua
+require("conform").setup({
+  formatters_by_ft = { sql = { "tsqlfmt" } },
+  formatters = { tsqlfmt = { command = "tsqlfmt", stdin = true } },
+})
+```
+
+Safety: each batch's output is tokenized again and compared with the
+input's tokens, comments included; only whitespace may differ, and case only
+for the words the formatter lower-cased. If they differ, or formatting
+panics, that batch is emitted exactly as written. Batches that don't parse,
+`@formatter:off` … `@formatter:on` lines, `GO` lines and SQLCMD lines are
+left as written too. CRLF / LF, a BOM and a missing final newline are kept
+(a file with mixed line endings is only formatted if every `\r` is inside a
+comment or string, else left alone).
 
 ## Commands
 
 ```sh
 nix develop                      # or direnv
+cargo run --release -- corpus corpus/private/          # format the test bed in memory: lines unchanged, fallbacks, idempotency
+cargo run --release -- corpus --list corpus/private/   # ... with every changed file
+cargo run --release -- corpus --diff FILE              # unified diff of what formatting FILE changes
+cargo test                                             # golden tests (tests/golden), token and idempotency checks
 cargo run --release -- check corpus/private/           # parse rate + grouped errors
 cargo run --release -- check --files corpus/private/   # ... plus every failing file
 cargo run --release -- spans corpus/private/           # AST span audit, grouped findings
@@ -36,8 +75,12 @@ columns, arguments, statements in a block) have only separators between
 them; and a node's span is not shorter than its `Display`, nor starts or
 ends with a different token.
 
-Formatting itself (`tsqlfmt < in.sql > out.sql`, for conform.nvim) comes once
-the whole test bed parses.
+`corpus` formats every file in memory and reports the files and lines left
+unchanged, the batches the safety net left as written (should be 0), the
+files where formatting twice differs from formatting once (should be 0), the
+slowest file and the files with the biggest diffs. Golden tests: each
+`tests/golden/NAME.sql` must format to `NAME.expected.sql`
+(`TSQLFMT_BLESS=1 cargo test` rewrites the expected files; review the diff).
 
 ## Status
 
@@ -56,6 +99,16 @@ top-level statements, 298605 nested nodes, 687211 tokens):
 |---|---|---|---|
 | 2026-11-19 | 153712 (22.37%) | 3364 | 15166 in 117 groups (fork `tsql` before the span work) |
 | 2026-11-19 | 41 (0.01%) | 0 | 96 in 5 groups (fork `tsql` + 18 span changes): the `USE` keyword (41 statements, 2 checks each), the `)` of table hints (12), `WITHIN GROUP (...)` (1, 2 checks) |
+
+Formatter (`tsqlfmt corpus`, same corpus: 510 files, 65365 lines; the
+largest file, 15539 lines / 1.4 MB, formats in about
+0.33 s). One generated seed file (12712 lines of `values` rows written with
+upper-case `NULL` and trailing commas) accounts for most changed lines; the
+last column leaves it out.
+
+| Date | Files unchanged | Lines unchanged | Safety fallbacks | Not idempotent | Lines unchanged without the seed file | Step |
+|---|---|---|---|---|---|---|
+| 2026-11-19 | 317 / 510 | 49825 / 65365 (76.23%) | 0 | 0 | 49787 / 52653 (94.56%) | Core: printer, safety net, case; source layout kept, statements at column 0 |
 
 ## Decisions
 

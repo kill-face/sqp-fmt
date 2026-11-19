@@ -9,8 +9,15 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-fn usage() -> ExitCode {
-    eprintln!("usage: tsqlfmt check [--files] <path>...\n       tsqlfmt spans [--details] <path>...");
+mod corpus;
+
+pub(crate) fn usage() -> ExitCode {
+    eprintln!(
+        "usage: tsqlfmt [FILE]                      format FILE (or stdin) to stdout\n       \
+         tsqlfmt corpus [--diff FILE] [--top N] <path>...\n       \
+         tsqlfmt check [--files] <path>...\n       \
+         tsqlfmt spans [--details] <path>..."
+    );
     ExitCode::from(2)
 }
 
@@ -21,7 +28,7 @@ fn skip_dir(path: &Path) -> bool {
     name.starts_with('.') || matches!(name, "bin" | "obj" | "node_modules" | "target")
 }
 
-fn collect(path: &Path, out: &mut Vec<PathBuf>) {
+pub(crate) fn collect(path: &Path, out: &mut Vec<PathBuf>) {
     if path.is_dir() {
         let mut entries: Vec<_> = std::fs::read_dir(path)
             .into_iter()
@@ -36,7 +43,10 @@ fn collect(path: &Path, out: &mut Vec<PathBuf>) {
             }
             collect(&p, out);
         }
-    } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("sql")) {
+    } else if path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("sql"))
+    {
         out.push(path.to_path_buf());
     }
 }
@@ -82,7 +92,11 @@ fn check(args: &[String]) -> ExitCode {
         }
     }
 
-    println!("{ok}/{} files parse ({} fail)", files.len(), files.len() - ok);
+    println!(
+        "{ok}/{} files parse ({} fail)",
+        files.len(),
+        files.len() - ok
+    );
     let mut groups: Vec<_> = groups.into_iter().collect();
     groups.sort_by(|a, b| b.1.0.cmp(&a.1.0).then_with(|| a.0.cmp(&b.0)));
     for (msg, (n, example)) in &groups {
@@ -94,7 +108,11 @@ fn check(args: &[String]) -> ExitCode {
             println!("  {f}");
         }
     }
-    if ok == files.len() { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+    if ok == files.len() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 /// `tsqlfmt spans [--details] <path>...`: audit the AST source spans of every
@@ -181,11 +199,43 @@ fn spans(args: &[String]) -> ExitCode {
     }
 }
 
+/// `tsqlfmt [FILE]`: format FILE (or stdin) to stdout. Batches that can't
+/// be formatted safely come out exactly as written.
+fn format_cmd(path: Option<&str>) -> ExitCode {
+    use std::io::{Read, Write};
+    // A panic is caught per batch and that batch left as written; keep the
+    // panic message off stderr, which editors show to the user.
+    std::panic::set_hook(Box::new(|_| {}));
+    let mut src = String::new();
+    let read = match path {
+        Some(p) => std::fs::read_to_string(p).map(|s| src = s),
+        None => std::io::stdin().read_to_string(&mut src).map(|_| ()),
+    };
+    if let Err(e) = read {
+        eprintln!("tsqlfmt: {e}");
+        return ExitCode::FAILURE;
+    }
+    let (out, _) = tsqlfmt::format(&src);
+    let mut stdout = std::io::stdout().lock();
+    if stdout
+        .write_all(out.as_bytes())
+        .and_then(|_| stdout.flush())
+        .is_err()
+    {
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("check") => check(&args[1..]),
         Some("spans") => spans(&args[1..]),
+        Some("corpus") => corpus::run(&args[1..]),
+        Some("-h" | "--help" | "help") => usage(),
+        Some(p) if !p.starts_with('-') => format_cmd(Some(p)),
+        Some("-") | None => format_cmd(None),
         _ => usage(),
     }
 }

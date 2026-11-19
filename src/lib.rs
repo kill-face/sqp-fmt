@@ -6,7 +6,13 @@
 //! its file line numbers by being prefixed with blank lines, so parser errors
 //! point at the right line in the file.
 
+pub mod build;
+pub mod case;
+pub mod format;
+pub mod layout;
 pub mod spans;
+
+pub use format::{Stats, format};
 
 use sqlparser::ast::Statement;
 use sqlparser::ast::comments::Comments;
@@ -49,7 +55,7 @@ pub fn is_sqlcmd_line(line: &str) -> bool {
 /// What a line ends inside of, so a `GO` on the next line is only a batch
 /// separator at the top level.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct LexState {
+pub(crate) struct LexState {
     /// Nesting depth of `/* */` (T-SQL block comments nest).
     comment_depth: usize,
     /// Inside a `'...'` string (`''` is an escaped quote).
@@ -59,12 +65,19 @@ struct LexState {
 }
 
 impl LexState {
-    fn at_top_level(self) -> bool {
+    pub(crate) fn at_top_level(self) -> bool {
         self == LexState::default()
     }
 
-    fn advance(mut self, line: &str) -> Self {
+    pub(crate) fn advance(self, line: &str) -> Self {
+        self.advance_comments(line, |_| {})
+    }
+
+    /// Like `advance`, also calling `comment` with the text of each comment
+    /// (or part of a block comment) on the line.
+    pub(crate) fn advance_comments(mut self, line: &str, mut comment: impl FnMut(&str)) -> Self {
         let b = line.as_bytes();
+        let mut block_from = (self.comment_depth > 0).then_some(0);
         let mut i = 0;
         while i < b.len() {
             let next = b.get(i + 1).copied();
@@ -77,6 +90,11 @@ impl LexState {
                     (b'*', Some(b'/')) => {
                         self.comment_depth -= 1;
                         i += 1;
+                        if self.comment_depth == 0
+                            && let Some(from) = block_from.take()
+                        {
+                            comment(&line[from..=i]);
+                        }
                     }
                     _ => {}
                 }
@@ -98,9 +116,13 @@ impl LexState {
                 }
             } else {
                 match (b[i], next) {
-                    (b'-', Some(b'-')) => break,
+                    (b'-', Some(b'-')) => {
+                        comment(&line[i..]);
+                        break;
+                    }
                     (b'/', Some(b'*')) => {
                         self.comment_depth = 1;
+                        block_from = Some(i);
                         i += 1;
                     }
                     (b'\'', _) => self.in_string = true,
@@ -109,6 +131,9 @@ impl LexState {
                 }
             }
             i += 1;
+        }
+        if let Some(from) = block_from {
+            comment(&line[from..]);
         }
         self
     }
@@ -123,7 +148,10 @@ pub fn split_batches(src: &str) -> Vec<Batch> {
     for (i, line) in src.lines().enumerate() {
         let lineno = i + 1;
         if state.at_top_level() && is_go_line(line) {
-            batches.push(Batch { start_line, text: std::mem::take(&mut current) });
+            batches.push(Batch {
+                start_line,
+                text: std::mem::take(&mut current),
+            });
             start_line = lineno + 1;
             continue;
         }
@@ -138,7 +166,10 @@ pub fn split_batches(src: &str) -> Vec<Batch> {
         current.push_str(line);
         current.push('\n');
     }
-    batches.push(Batch { start_line, text: current });
+    batches.push(Batch {
+        start_line,
+        text: current,
+    });
     batches.retain(|b| !b.text.trim().is_empty());
     batches
 }
@@ -154,7 +185,9 @@ pub fn parse_batch(batch: &Batch) -> Result<(Vec<Statement>, Comments), ParserEr
     let mut parser = Parser::new(&MsSqlDialect {})
         .with_options(options)
         .try_with_sql(&batch.text)?;
-    parser.parse_statements().map(|stmts| (stmts, parser.into_comments()))
+    parser
+        .parse_statements()
+        .map(|stmts| (stmts, parser.into_comments()))
 }
 
 #[cfg(test)]
@@ -191,7 +224,8 @@ mod tests {
 
     #[test]
     fn statements_without_semicolons() {
-        let b = split_batches("if 1 = 1\nbegin\n    declare @a int\n    set @a = 1\nend\nselect 1\n");
+        let b =
+            split_batches("if 1 = 1\nbegin\n    declare @a int\n    set @a = 1\nend\nselect 1\n");
         let (stmts, _) = parse_batch(&b[0]).unwrap();
         assert_eq!(stmts.len(), 2);
     }
