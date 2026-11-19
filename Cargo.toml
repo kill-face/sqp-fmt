@@ -1,0 +1,12 @@
+[package]
+name = "tsqlfmt"
+version = "0.1.0"
+edition = "2024"
+description = "T-SQL formatter that only changes whitespace and keyword case"
+license = "MIT"
+
+[dependencies]
+# Fork of apache/datafusion-sqlparser-rs with the T-SQL grammar gaps filled.
+# Path dependency while both are developed side by side; switch to the git
+# fork (kill-face/datafusion-sqlparser-rs, bookmark `tsql`) for Nix builds.
+sqlparser = { path = "../datafusion-sqlparser-rs" }

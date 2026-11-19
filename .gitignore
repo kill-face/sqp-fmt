@@ -1,0 +1,6 @@
+/target
+result
+result-*
+.direnv/
+# Never commit SQL from private repos; point TSQLFMT_CORPUS at them instead.
+/corpus/
