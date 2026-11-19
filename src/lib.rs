@@ -6,6 +6,8 @@
 //! its file line numbers by being prefixed with blank lines, so parser errors
 //! point at the right line in the file.
 
+pub mod spans;
+
 use sqlparser::ast::Statement;
 use sqlparser::ast::comments::Comments;
 use sqlparser::dialect::MsSqlDialect;
