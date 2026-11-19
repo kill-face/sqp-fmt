@@ -262,6 +262,12 @@ impl Builder<'_> {
         i < self.n() && self.l.trivia[i].newlines() > 0
     }
 
+    /// Whether the source had a line break anywhere inside `r`.
+    pub fn multiline(&self, r: R) -> bool {
+        (r.0 + 1..=r.1).any(|i| self.nl_before(i))
+            || (r.0..=r.1).any(|i| self.l.toks[i].multiline())
+    }
+
     /// The `)` matching the `(` at `open`.
     pub fn close_paren(&self, open: usize) -> Option<usize> {
         let mut depth = 0usize;

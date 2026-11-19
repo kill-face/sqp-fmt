@@ -112,6 +112,7 @@ last column leaves it out.
 |---|---|---|---|---|---|---|
 | 2026-11-19 | 317 / 510 | 49825 / 65365 (76.23%) | 0 | 0 | 49787 / 52653 (94.56%) | Core: printer, safety net, case; source layout kept, statements at column 0 |
 | 2026-11-19 | 443 / 510 | 52292 / 65365 (80.00%) | 0 | 0 | 52253 / 52653 (99.24%) | Statement families: select / from / join / where, CTEs, subqueries, insert / values / update / delete / merge, case, create table / index / alter table, procedures / functions / views / triggers, declare / set, if / while / try blocks (STYLE.md rules R1-R24, R27) |
+| 2026-11-19 | 417 / 510 | 51995 / 65365 (79.55%) | 0 | 0 | 51956 / 52653 (98.68%) | STYLE.md changes 1 and 2 (boolean blocks, window blocks; R25, R26). The changed lines left: the two changes (~320 lines), blank-line runs collapsed (~100), corpus inconsistencies where the majority rule wins (inline named constraints, trailing-comma lists, misaligned columns, `merge … on` indented), and the generated seed file |
 
 ## Decisions
 

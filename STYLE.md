@@ -371,6 +371,17 @@ Trigger: `on`, `after …` and `as` each on a line 4 in, `begin` at the
 
 `=` spaced, including named arguments (`@id = @a`; 919 of 934).
 
+### R25 Logical blocks (`24-boolean-blocks`, STYLE.md change 1)
+
+As in "Change 1" above: a parenthesised `and` / `or` group is a block when
+the author put a line break after `(`, or it doesn't fit; contents 2 in from
+`(`, one operand per line with `and` / `or` leading, `)` under `(`.
+
+### R26 Window blocks (`25-window-blocks`, STYLE.md change 2)
+
+As in "Change 2" above, for an `over (…)` the author wrote over several
+lines or that doesn't fit; a short one written on one line stays there.
+
 ### R27 Formatter control (`26-formatter-off`, `27-unparsed`)
 
 `@formatter:off` … `@formatter:on` lines (both included) are verbatim, also
@@ -388,6 +399,16 @@ is what's implemented.
   by the test bed); the reference output puts `(` on the `as` line instead.
 - A select's first item after a comment goes 4 in from `select`, left of the
   other items (test bed, 4 of 4).
+- "A long `over (…)`" is read as "doesn't fit, or written over several
+  lines"; an alternative is "always a block when it has both `partition by`
+  and `order by`", as the example above suggests.
+- Subquery contents go 4 in from their `(`; change 1's 2-in rule is applied
+  to boolean groups only.
+- Change 1 also reshapes the seed scripts' `when matched and (` predicates
+  (written with `(` ending the line, contents 4 in from `merge` and trailing
+  `or`): contents now go 2 in from the `(`, far right of `merge`. If blocks
+  whose `(` ends a line should indent from that line instead, that's a
+  one-line change in `nested()` (`src/build/expr.rs`).
 - `in (subquery)` keeps `(` on the `in` line (the reference output; the test
   bed has 2 cases, one each way).
 - `merge … on` sits at the `merge` column (40) though 27 statements indent

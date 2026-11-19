@@ -1,11 +1,21 @@
-//! Expressions: operators, boolean conditions, `case`, function calls and
-//! window clauses, subqueries.
+//! Expressions: operators, boolean conditions and blocks (STYLE.md change
+//! 1), `case`, function calls and window clauses (change 2), subqueries.
 
 use sqlparser::ast::*;
 use sqlparser::tokenizer::Token;
 
 use super::{Builder, R};
 use crate::layout::{Ind, Rule, Sp};
+
+fn is_bool(e: &Expr) -> bool {
+    matches!(
+        e,
+        Expr::BinaryOp {
+            op: BinaryOperator::And | BinaryOperator::Or,
+            ..
+        }
+    )
+}
 
 impl Builder<'_> {
     pub fn expr(&mut self, e: &Expr) {
@@ -307,8 +317,9 @@ impl Builder<'_> {
         operands.push(e);
     }
 
-    /// `( … )` around an expression: hugging its contents, the author's line
-    /// breaks kept.
+    /// `( … )` around an expression. A boolean group is a block (STYLE.md
+    /// change 1) when the author wrote a line break after `(` or it doesn't
+    /// fit: contents 2 in from `(`, one predicate per line, `)` under `(`.
     fn nested(&mut self, p: &Parens<Box<Expr>>, r: R) {
         let inner = p.content.as_ref();
         let Some(ir) = self.rng(inner) else {
@@ -316,12 +327,33 @@ impl Builder<'_> {
             return;
         };
         let (open, close) = (r.0, r.1);
-        self.expr(inner);
-        if self.is(open, &Token::LParen)
-            && self.is(close, &Token::RParen)
-            && ir.0 == open + 1
-            && ir.1 + 1 == close
+        if !self.is(open, &Token::LParen)
+            || !self.is(close, &Token::RParen)
+            || ir.0 != open + 1
+            || ir.1 + 1 != close
         {
+            self.expr(inner);
+            return;
+        }
+        if is_bool(inner) {
+            let g = self.group(open, close, false);
+            if self.nl_before(ir.0) {
+                self.l.groups[g].force = true;
+            }
+            let mut operands = Vec::new();
+            let mut ops = Vec::new();
+            self.flatten_bool(inner, &mut operands, &mut ops);
+            for x in &operands {
+                self.expr(x);
+            }
+            self.set(ir.0, Rule::BreakIf(g, Ind::Col(open, 2), Sp::No));
+            for op in ops {
+                self.set(op, Rule::BreakIf(g, Ind::Col(open, 2), Sp::One));
+                self.set(op + 1, Rule::Flat(Sp::One));
+            }
+            self.set(close, Rule::BreakIf(g, Ind::Col(open, 0), Sp::No));
+        } else {
+            self.expr(inner);
             self.set(ir.0, Rule::Keep(Ind::Src(open), Sp::No));
             self.set(close, Rule::Keep(Ind::Src(open), Sp::No));
         }
@@ -384,8 +416,10 @@ impl Builder<'_> {
         }
     }
 
-    /// `over (partition by … order by … frame)`: spaced, the author's line
-    /// breaks kept.
+    /// `over (partition by … order by … frame)`: a block when the author
+    /// wrote it over several lines or it doesn't fit (STYLE.md change 2):
+    /// `(` ends the line, each clause on its own line 2 in from the select
+    /// item, `)` under the item.
     fn window(&mut self, spec: &WindowSpec, fr: R) {
         let (Some(open), Some(close)) = (
             self.att(&spec.opening_paren_token),
@@ -402,25 +436,55 @@ impl Builder<'_> {
             self.set(open - 1, Rule::Flat(Sp::One));
             self.set(open, Rule::Flat(Sp::One));
         }
+        let item = self.item.unwrap_or(fr.0);
+        let g = self.group(open, close, false);
+        if self.multiline((open, close)) {
+            self.l.groups[g].force = true;
+        }
+        let mut clauses: Vec<usize> = Vec::new();
         let mut parts: Vec<Vec<R>> = Vec::new();
-        let mut rs = Vec::new();
-        for e in &spec.partition_by {
-            self.expr(e);
-            if let Some(er) = self.rng(e) {
-                rs.push(er);
+        if !spec.partition_by.is_empty() {
+            let mut rs = Vec::new();
+            for e in &spec.partition_by {
+                self.expr(e);
+                if let Some(er) = self.rng(e) {
+                    rs.push(er);
+                }
             }
-        }
-        parts.push(rs);
-        let mut rs = Vec::new();
-        for o in &spec.order_by {
-            self.generic(o, false);
-            if let Some(or) = self.rng(o) {
-                rs.push(or);
+            if let Some(f) = rs.first()
+                && f.0 >= 2
+                && self.is_kw(f.0 - 2, "partition")
+            {
+                clauses.push(f.0 - 2);
+                self.set(f.0 - 1, Rule::Flat(Sp::One));
+                self.set(f.0, Rule::Flat(Sp::One));
             }
+            parts.push(rs);
         }
-        parts.push(rs);
+        if !spec.order_by.is_empty() {
+            let mut rs = Vec::new();
+            for o in &spec.order_by {
+                self.generic(o, false);
+                if let Some(or) = self.rng(o) {
+                    rs.push(or);
+                }
+            }
+            if let Some(f) = rs.first()
+                && f.0 >= 2
+                && self.is_kw(f.0 - 2, "order")
+            {
+                clauses.push(f.0 - 2);
+                self.set(f.0 - 1, Rule::Flat(Sp::One));
+                self.set(f.0, Rule::Flat(Sp::One));
+            }
+            parts.push(rs);
+        }
         if let Some(wf) = &spec.window_frame {
             self.generic(wf, false);
+            let after = parts.iter().flatten().map(|x| x.1).max().unwrap_or(open);
+            if after + 1 < close {
+                clauses.push(after + 1);
+            }
         }
         for rs in &parts {
             // Line breaks in a list kept, relative to the clause keyword.
@@ -429,6 +493,15 @@ impl Builder<'_> {
                 self.comma_flat(rs, kw);
             }
         }
+        if clauses.first() != Some(&(open + 1)) {
+            // Something we don't know (a window name): keep the source.
+            return;
+        }
+        for (k, &c) in clauses.iter().enumerate() {
+            let flat = if k == 0 { Sp::No } else { Sp::One };
+            self.set(c, Rule::BreakIf(g, Ind::Col(item, 2), flat));
+        }
+        self.set(close, Rule::BreakIf(g, Ind::Col(item, 0), Sp::No));
     }
 
     /// `case [x] when … then … else … end`: on one line if the author wrote
