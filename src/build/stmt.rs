@@ -1,0 +1,411 @@
+//! Statements: dispatch, blocks (`begin … end`, `begin try`, `if`, `while`),
+//! `declare`, `set`, and routine bodies.
+
+use sqlparser::ast::*;
+use sqlparser::tokenizer::Token;
+
+use super::{Builder, R};
+use crate::layout::{Ind, Rule, Sp};
+
+impl Builder<'_> {
+    pub fn statement(&mut self, s: &Statement) {
+        let Some(r) = self.rng(s) else {
+            self.generic(s, true);
+            return;
+        };
+        self.src(r);
+        match s {
+            Statement::Query(q) => self.query(q),
+            Statement::Insert(i) => self.insert(i, r),
+            Statement::Update(u) => self.update(u, r),
+            Statement::Delete(d) => self.delete(d, r),
+            Statement::Merge(m) => self.merge(m, r),
+            Statement::If(i) => self.if_stmt(i, r),
+            Statement::While(w) => self.while_stmt(w, r),
+            Statement::StartTransaction {
+                statements,
+                has_end_keyword: true,
+                end_token,
+                ..
+            } => {
+                let end = self.att(end_token);
+                self.block(r.0, statements, end, r);
+            }
+            Statement::CreateProcedure { params, body, .. } => {
+                self.create_procedure(s, params.as_deref(), body, r)
+            }
+            Statement::CreateFunction(f) => self.create_function(f, r),
+            Statement::CreateView(v) => self.create_view(v, r),
+            Statement::CreateTrigger(t) => self.create_trigger(t, r),
+            Statement::CreateTable(t) => self.create_table(t, r),
+            Statement::CreateIndex(i) => self.create_index(i, r),
+            Statement::AlterTable(a) => self.alter_table(a, r),
+            Statement::Declare { stmts, .. } => self.declare(stmts, r),
+            Statement::CreateType {
+                representation:
+                    Some(UserDefinedTypeRepresentation::Table {
+                        columns,
+                        constraints,
+                    }),
+                ..
+            } => {
+                if !self.column_block(r.0, columns, constraints) {
+                    self.generic(s, true);
+                }
+            }
+            Statement::Set(set) => self.set_stmt(set, r),
+            _ => self.generic(s, true),
+        }
+    }
+
+    /// `begin [try|catch] … end [try|catch]` starting at token `begin`: the
+    /// statements one indent in, `end` under `begin`.
+    pub fn block(&mut self, begin: usize, stmts: &[Statement], end: Option<usize>, r: R) {
+        self.statements(stmts, Ind::Col(begin, 4));
+        let end = end.or_else(|| self.find_end(begin, stmts, r));
+        if let Some(e) = end
+            && e > begin
+            && e <= r.1
+        {
+            self.set(e, Rule::Break(Ind::Col(begin, 0)));
+        }
+    }
+
+    /// The `end` of a block when the AST doesn't say: the first `end` after
+    /// the last statement.
+    fn find_end(&self, begin: usize, stmts: &[Statement], r: R) -> Option<usize> {
+        let from = stmts
+            .last()
+            .and_then(|s| self.rng(s))
+            .map_or(begin + 1, |x| x.1 + 1);
+        (from..=r.1).find(|&i| self.is_kw(i, "end"))
+    }
+
+    /// The body of an `if` / `while` / `else`, after the token `head`.
+    fn cond_body(&mut self, head: usize, body: &ConditionalStatements) {
+        match body {
+            ConditionalStatements::BeginEnd(bes) => {
+                let Some(begin) = self.att(&bes.begin_token) else {
+                    return;
+                };
+                self.set(begin, Rule::Break(Ind::Col(head, 4)));
+                let end = self.att(&bes.end_token);
+                let r = (begin, end.unwrap_or(begin));
+                self.src(r);
+                self.block(begin, &bes.statements, end, r);
+            }
+            ConditionalStatements::Sequence { statements } => {
+                self.statements(statements, Ind::Col(head, 4));
+            }
+        }
+    }
+
+    /// An `if` / `while` condition: an `exists (` in it (at its top level,
+    /// or in an `and` / `or` chain) puts the `(` 4 in from `if`.
+    fn cond_exists(&mut self, c: &Expr, head: usize) {
+        let mut operands = Vec::new();
+        let mut ops = Vec::new();
+        self.flatten_bool_pub(c, &mut operands, &mut ops);
+        // The chain keeps its source layout (spaced operators).
+        for x in operands {
+            self.exists_paren = Some(Ind::Col(head, 4));
+            self.expr(x);
+            self.exists_paren = None;
+        }
+        for op in ops {
+            let anchor = self.l.gaps[op].anchor;
+            self.set(op, Rule::Keep(Ind::Src(anchor), Sp::One));
+            self.set(op + 1, Rule::Keep(Ind::Src(anchor), Sp::One));
+        }
+    }
+
+    fn if_stmt(&mut self, s: &IfStatement, _r: R) {
+        let Some(if_tok) = self.att(&s.if_block.start_token) else {
+            return;
+        };
+        if let Some(c) = &s.if_block.condition
+            && let Some(cr) = self.rng(c)
+        {
+            self.set(cr.0, Rule::Flat(Sp::One));
+            self.cond_exists(c, if_tok);
+        }
+        self.cond_body(if_tok, &s.if_block.conditional_statements);
+        for b in &s.elseif_blocks {
+            self.generic(b, false);
+        }
+        if let Some(e) = &s.else_block {
+            let Some(else_tok) = self.att(&e.start_token) else {
+                return;
+            };
+            self.set(else_tok, Rule::Break(Ind::Col(if_tok, 0)));
+            // `else if` on one line stays that way.
+            if let ConditionalStatements::Sequence { statements } = &e.conditional_statements
+                && let [inner @ Statement::If(_)] = statements.as_slice()
+                && let Some(ir) = self.rng(inner)
+                && !self.nl_before(ir.0)
+                && ir.0 == else_tok + 1
+            {
+                self.statement(inner);
+                self.set(ir.0, Rule::Flat(Sp::One));
+                return;
+            }
+            self.cond_body(else_tok, &e.conditional_statements);
+        }
+    }
+
+    fn while_stmt(&mut self, s: &WhileStatement, _r: R) {
+        let b = &s.while_block;
+        let Some(w) = self.att(&b.start_token) else {
+            return;
+        };
+        if let Some(c) = &b.condition
+            && let Some(cr) = self.rng(c)
+        {
+            self.set(cr.0, Rule::Flat(Sp::One));
+            self.cond_exists(c, w);
+        }
+        self.cond_body(w, &b.conditional_statements);
+    }
+
+    fn declare(&mut self, stmts: &[Declare], r: R) {
+        for d in stmts {
+            if let Some(
+                DeclareAssignment::Expr(e)
+                | DeclareAssignment::Default(e)
+                | DeclareAssignment::MsSqlAssignment(e),
+            ) = &d.assignment
+            {
+                self.expr(e);
+                // `= value`
+                if let Some(er) = self.rng(e.as_ref()) {
+                    let eq = er.0 - 1;
+                    if eq > r.0 && self.is(eq, &Token::Eq) {
+                        self.set(eq, Rule::Flat(Sp::One));
+                        let anchor = r.0;
+                        self.set(er.0, Rule::Keep(Ind::Src(anchor), Sp::One));
+                    }
+                }
+            } else if let Some(DataType::Table(Some(cols))) = &d.data_type {
+                // declare @t table (…)
+                if !self.column_block(r.0, cols, &[]) {
+                    self.generic(d, false);
+                }
+            } else {
+                self.generic(d, false);
+            }
+            if let Some(q) = &d.for_query {
+                self.query(q);
+            }
+        }
+    }
+
+    fn set_stmt(&mut self, s: &Set, r: R) {
+        match s {
+            Set::SingleAssignment { values, .. } => {
+                for v in values {
+                    self.expr(v);
+                    if let Some(vr) = self.rng(v) {
+                        let eq = vr.0 - 1;
+                        if eq > r.0 && self.is(eq, &Token::Eq) {
+                            self.set(eq, Rule::Flat(Sp::One));
+                            self.set(vr.0, Rule::Keep(Ind::Src(r.0), Sp::One));
+                        }
+                    }
+                }
+            }
+            _ => self.generic(s, false),
+        }
+    }
+
+    /// `create procedure name (params) as body`.
+    fn create_procedure(
+        &mut self,
+        s: &Statement,
+        params: Option<&[ProcedureParam]>,
+        body: &CreateProcedureBody,
+        r: R,
+    ) {
+        let create = r.0;
+        if let Some(params) = params {
+            self.routine_params(
+                create,
+                params
+                    .iter()
+                    .map(|p| (p.name.span, &p.data_type, &p.end_token, p.default.as_ref())),
+                r,
+            );
+        }
+        match body {
+            CreateProcedureBody::As(cs) => self.routine_body(create, cs, r),
+            _ => self.generic(s, true),
+        }
+    }
+
+    /// Parameter lists of procedures and functions. In parentheses: `(` on
+    /// its own line, one parameter per line indented 2, leading commas at
+    /// the `create` column, types aligned, `)` on its own line. Without
+    /// parentheses: one per line indented 2.
+    pub fn routine_params<'p>(
+        &mut self,
+        create: usize,
+        params: impl Iterator<
+            Item = (
+                sqlparser::tokenizer::Span,
+                &'p DataType,
+                &'p helpers::attached_token::AttachedToken,
+                Option<&'p Expr>,
+            ),
+        >,
+        r: R,
+    ) {
+        let mut items = Vec::new();
+        let a = self.align_group();
+        for (name_span, _dt, end, default) in params {
+            let Some(name) = self.at(name_span.start) else {
+                return;
+            };
+            let Some(end) = self.att(end) else { return };
+            if end < name {
+                return;
+            }
+            items.push((name, end));
+            // Type right after the name, aligned.
+            self.align(name + 1, a, name);
+            self.set(name + 1, Rule::Flat(Sp::One));
+            if let Some(d) = default {
+                self.expr(d);
+                if let Some(dr) = self.rng(d)
+                    && self.is(dr.0 - 1, &Token::Eq)
+                {
+                    self.set(dr.0 - 1, Rule::Flat(Sp::One));
+                    self.set(dr.0, Rule::Flat(Sp::One));
+                }
+            }
+        }
+        let Some(&first) = items.first() else { return };
+        let last = items.last().unwrap().1;
+        if !self.comma_separated(&items) || last > r.1 {
+            return;
+        }
+        let open = first.0 - 1;
+        if self.is(open, &Token::LParen) && self.is(last + 1, &Token::RParen) {
+            self.set(open, Rule::Break(Ind::Col(create, 0)));
+            self.set(first.0, Rule::Break(Ind::Col(create, 2)));
+            for w in items.windows(2) {
+                self.set(w[0].1 + 1, Rule::Break(Ind::Col(create, 0)));
+                self.set(w[1].0, Rule::Flat(Sp::One));
+            }
+            self.set(last + 1, Rule::Break(Ind::Col(create, 0)));
+        } else {
+            self.set(first.0, Rule::Break(Ind::Col(create, 2)));
+            for w in items.windows(2) {
+                self.set(w[0].1 + 1, Rule::Break(Ind::Col(create, 0)));
+                self.set(w[1].0, Rule::Flat(Sp::One));
+            }
+        }
+    }
+
+    /// `as` + body of a procedure / trigger: `as` where the author put it
+    /// (end of the header line or its own line), `begin` at the `create`
+    /// column.
+    fn routine_body(&mut self, create: usize, cs: &ConditionalStatements, r: R) {
+        match cs {
+            ConditionalStatements::BeginEnd(bes) => {
+                let Some(begin) = self.att(&bes.begin_token) else {
+                    return;
+                };
+                let end = self.att(&bes.end_token);
+                if begin > 0 && self.is_kw(begin - 1, "as") && self.rule(begin - 1) == Rule::Src {
+                    let as_tok = begin - 1;
+                    self.set(as_tok, Rule::Keep(Ind::Col(create, 0), Sp::One));
+                }
+                self.set(begin, Rule::Break(Ind::Col(create, 0)));
+                self.src((begin, end.unwrap_or(r.1)));
+                self.block(begin, &bes.statements, end, (begin, end.unwrap_or(r.1)));
+            }
+            ConditionalStatements::Sequence { statements } => {
+                // `as` then statements without begin/end.
+                self.statements(statements, Ind::Col(create, 0));
+            }
+        }
+    }
+
+    fn create_function(&mut self, f: &CreateFunction, r: R) {
+        let create = r.0;
+        if let Some(args) = &f.args {
+            let named: Vec<_> = args
+                .iter()
+                .filter_map(|a| {
+                    a.name
+                        .as_ref()
+                        .map(|n| (n.span, &a.data_type, &a.end_token, a.default_expr.as_ref()))
+                })
+                .collect();
+            if named.len() == args.len() {
+                self.routine_params(create, named.into_iter(), r);
+            }
+        }
+        // `returns …` on its own line.
+        if f.return_type.is_some() {
+            let from = f
+                .args
+                .as_ref()
+                .and_then(|a| a.last())
+                .and_then(|a| self.att(&a.end_token))
+                .unwrap_or(create);
+            if let Some(k) = self.find_kw(from + 1, r.1, "returns") {
+                self.set(k, Rule::Break(Ind::Col(create, 0)));
+            }
+        }
+        match &f.function_body {
+            Some(CreateFunctionBody::AsBeginEnd(bes)) => {
+                let Some(begin) = self.att(&bes.begin_token) else {
+                    return;
+                };
+                let end = self.att(&bes.end_token);
+                self.set(begin, Rule::Break(Ind::Col(create, 0)));
+                self.block(begin, &bes.statements, end, (begin, end.unwrap_or(r.1)));
+                if let Some(FunctionReturnType::DataType(_)) = &f.return_type {
+                    // returns ... as: keep
+                }
+            }
+            Some(body) => self.generic(body, false),
+            None => {}
+        }
+        if let Some(rt) = &f.return_type {
+            self.generic(rt, false);
+        }
+    }
+
+    fn create_view(&mut self, v: &CreateView, r: R) {
+        // The query one indent in (on a new line).
+        if let Some(qr) = self.rng(v.query.as_ref()) {
+            self.set(qr.0, Rule::Break(Ind::Col(r.0, 4)));
+        }
+        self.query(&v.query);
+    }
+
+    /// `create trigger X\n    on T\n    after insert, update\n    as\nbegin`.
+    fn create_trigger(&mut self, t: &CreateTrigger, r: R) {
+        let create = r.0;
+        if let Some(tr) = self.rng(&t.table_name)
+            && self.is_kw(tr.0 - 1, "on")
+        {
+            self.set(tr.0 - 1, Rule::Break(Ind::Col(create, 4)));
+            let k = tr.1 + 1;
+            if ["after", "for", "instead"].iter().any(|w| self.is_kw(k, w)) {
+                self.set(k, Rule::Break(Ind::Col(create, 4)));
+            }
+        }
+        if let Some(ConditionalStatements::BeginEnd(bes)) = &t.statements
+            && let Some(begin) = self.att(&bes.begin_token)
+            && self.is_kw(begin - 1, "as")
+        {
+            self.set(begin - 1, Rule::Break(Ind::Col(create, 4)));
+        }
+        match &t.statements {
+            Some(cs) => self.routine_body(create, cs, r),
+            None => self.generic(t, false),
+        }
+    }
+}

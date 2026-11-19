@@ -22,9 +22,11 @@ style is in [STYLE.md](STYLE.md).
   group / fill to the margin), with indents relative to tokens printed
   earlier and alignment columns. The printer only ever writes whitespace
   between the tokens, so it can't drop or reorder anything.
-- `src/build/`: sets the rules from the AST. Every gap starts as "keep the
-  source layout, re-indented with its surroundings"; so far only top-level
-  statements are placed (each starts a line at column 0).
+- `src/build/`: sets the rules from the AST (`stmt.rs` statements and
+  blocks, `query.rs` queries, `expr.rs` expressions, `dml.rs`, `ddl.rs`).
+  Every gap starts as "keep the source layout, re-indented with its
+  surroundings"; handlers replace that for the constructs they know, so
+  anything unknown keeps its layout.
 - `src/case.rs`: keyword / built-in function / system type case, deciding
   identifiers by the AST.
 - `src/corpus.rs`: the `corpus` progress measure.
@@ -109,6 +111,7 @@ last column leaves it out.
 | Date | Files unchanged | Lines unchanged | Safety fallbacks | Not idempotent | Lines unchanged without the seed file | Step |
 |---|---|---|---|---|---|---|
 | 2026-11-19 | 317 / 510 | 49825 / 65365 (76.23%) | 0 | 0 | 49787 / 52653 (94.56%) | Core: printer, safety net, case; source layout kept, statements at column 0 |
+| 2026-11-19 | 443 / 510 | 52292 / 65365 (80.00%) | 0 | 0 | 52253 / 52653 (99.24%) | Statement families: select / from / join / where, CTEs, subqueries, insert / values / update / delete / merge, case, create table / index / alter table, procedures / functions / views / triggers, declare / set, if / while / try blocks (STYLE.md rules R1-R24, R27) |
 
 ## Decisions
 

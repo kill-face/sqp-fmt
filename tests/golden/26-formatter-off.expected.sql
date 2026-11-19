@@ -6,7 +6,7 @@ select   2   as   b,
 select 4 as d
 create table #T
 (
-    Id int,
+    Id   int,
     --@formatter:off
     Calc  as   (Id   +   1),
     --@formatter:on
