@@ -3,13 +3,15 @@
 use sqlparser::ast::*;
 use sqlparser::tokenizer::Token;
 
-use super::{Builder, R};
+use super::{Builder, Ctx, R};
+use crate::config::ListStyle;
 use crate::layout::{Ind, Rule, Sp};
 
 impl Builder<'_> {
-    /// A parenthesised column list `(a, b, c)`, filled to the margin with
-    /// leading commas under the `(` (`( a, b\n, c)` once it wraps).
-    pub fn column_list(&mut self, cols: &[R]) {
+    /// A parenthesised column list `(a, b, c)` laid out by `st`; by default
+    /// filled to the margin with leading commas under the `(` (`( a, b\n,
+    /// c)` once it wraps).
+    pub fn column_list(&mut self, cols: &[R], st: ListStyle) {
         let (Some(f), Some(l)) = (cols.first(), cols.last()) else {
             return;
         };
@@ -23,22 +25,16 @@ impl Builder<'_> {
         for c in cols {
             self.src(*c);
         }
-        let g = self.group(open, close, true);
         let anchor = self.l.gaps[open].anchor;
         self.set(open, Rule::Keep(Ind::Src(anchor), Sp::One));
-        self.set(f.0, Rule::SpaceIf(g, Sp::One, Sp::No));
-        for w in cols.windows(2) {
-            self.set(w[0].1 + 1, Rule::Fill(g, Ind::Col(open, 0), Sp::No));
-            self.set(w[1].0, Rule::FlatIn(g, Sp::One));
-        }
-        self.set(close, Rule::Flat(Sp::No));
+        self.paren_list(open, cols, close, st, anchor);
     }
 
     pub fn insert(&mut self, ins: &Insert, r: R) {
         let insert = r.0;
         let cols: Vec<R> = ins.columns.iter().filter_map(|c| self.rng(c)).collect();
         if cols.len() == ins.columns.len() {
-            self.column_list(&cols);
+            self.column_list(&cols, self.cfg.insert_columns.style());
         }
         if let Some(src) = &ins.source {
             if let Some(sr) = self.rng(src.as_ref()) {
@@ -112,10 +108,10 @@ impl Builder<'_> {
                 let wt = wr.0 - 1;
                 self.set(wt, Rule::Break(clause));
                 self.set(wr.0, Rule::Flat(Sp::One));
-                self.condition(w, wt, 2);
+                self.condition(w, wt, 2, Ctx::Where);
                 return;
             }
-            self.expr(w);
+            self.in_ctx(Ctx::Where, |b| b.expr(w));
         }
     }
 
@@ -190,7 +186,10 @@ impl Builder<'_> {
             self.set(sr.0 - 1, Rule::Break(clause));
             self.set(sr.0, Rule::Flat(Sp::One));
         }
-        self.expr(&m.on);
+        self.in_ctx(Ctx::MergeOn, |b| {
+            b.chain = Some(Ctx::MergeOn);
+            b.expr(&m.on);
+        });
         if let Some(or) = self.rng(m.on.as_ref())
             && self.is_kw(or.0 - 1, "on")
         {
@@ -203,21 +202,30 @@ impl Builder<'_> {
                 continue;
             };
             self.set(when, Rule::Break(clause));
+            // The action on its own line one indent in, or after `then`.
+            let action = if self.cfg.merge_when.action_on_new_line {
+                Rule::Break(Ind::Col(merge, self.ind()))
+            } else {
+                Rule::Flat(Sp::One)
+            };
             if let Some(p) = &c.predicate {
-                self.expr(p);
+                self.in_ctx(Ctx::MergeWhen, |b| {
+                    b.chain = Some(Ctx::MergeWhen);
+                    b.expr(p);
+                });
             }
             match &c.action {
                 MergeAction::Update(u) => {
                     let Some(upd) = self.att(&u.update_token) else {
                         continue;
                     };
-                    self.set(upd, Rule::Break(Ind::Col(merge, 4)));
+                    self.set(upd, action);
                     match &u.kind {
                         MergeUpdateKind::Set(assignments) => {
                             if let Some(a0) = assignments.first().and_then(|a| self.rng(a)) {
                                 let set_tok = a0.0 - 1;
                                 if self.is_kw(set_tok, "set") {
-                                    self.set(set_tok, Rule::Break(Ind::Col(merge, 4)));
+                                    self.set(set_tok, Rule::Break(Ind::Col(merge, self.ind())));
                                     self.assignments(set_tok, assignments);
                                 }
                             }
@@ -229,17 +237,17 @@ impl Builder<'_> {
                     let Some(ins) = self.att(&i.insert_token) else {
                         continue;
                     };
-                    self.set(ins, Rule::Break(Ind::Col(merge, 4)));
+                    self.set(ins, action);
                     let cols: Vec<R> = i.columns.iter().filter_map(|c| self.rng(c)).collect();
                     if cols.len() == i.columns.len() && !cols.is_empty() {
-                        self.column_list(&cols);
+                        self.column_list(&cols, self.cfg.insert_columns.style());
                         self.set(cols[0].0 - 1, Rule::Flat(Sp::One));
                     }
                     if let MergeInsertKind::Values(v) = &i.kind
                         && let Some(kind) = self.att(&i.kind_token)
                         && self.is_kw(kind, "values")
                     {
-                        self.set(kind, Rule::Break(Ind::Col(merge, 4)));
+                        self.set(kind, Rule::Break(Ind::Col(merge, self.ind())));
                         let mut items = Vec::new();
                         for row in &v.rows {
                             for e in &row.content {
@@ -253,7 +261,7 @@ impl Builder<'_> {
                             && items.len() == v.rows[0].content.len()
                             && !items.is_empty()
                         {
-                            self.column_list(&items);
+                            self.column_list(&items, self.cfg.values.row.style());
                             self.set(items[0].0 - 1, Rule::Flat(Sp::One));
                         }
                         continue;
@@ -262,7 +270,7 @@ impl Builder<'_> {
                 }
                 MergeAction::Delete { delete_token } => {
                     if let Some(d) = self.att(delete_token) {
-                        self.set(d, Rule::Break(Ind::Col(merge, 4)));
+                        self.set(d, action);
                     }
                 }
                 a => self.generic(a, false),

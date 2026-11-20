@@ -1,0 +1,19 @@
+margin = 60
+type_case = "as_is"
+
+[in_list]
+wrap = "always"
+
+[function_args]
+wrap = "if_long"
+
+[exec_args]
+wrap = "never"
+keep_line_breaks = false
+
+[index_columns]
+wrap = "never"
+keep_line_breaks = false
+
+[view_columns]
+wrap = "always"

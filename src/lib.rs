@@ -8,11 +8,13 @@
 
 pub mod build;
 pub mod case;
+pub mod config;
 pub mod format;
 pub mod layout;
 pub mod spans;
 
-pub use format::{Stats, format};
+pub use config::Config;
+pub use format::{Stats, format, format_with};
 
 use sqlparser::ast::Statement;
 use sqlparser::ast::comments::Comments;

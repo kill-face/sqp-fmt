@@ -4,10 +4,11 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use sqlparser::ast::Statement;
-use sqlparser::dialect::MsSqlDialect;
+use sqlparser::dialect::Dialect;
 use sqlparser::parser::{Parser, ParserOptions};
 use sqlparser::tokenizer::{Location, Token, TokenWithSpan, Tokenizer, Whitespace};
 
+use crate::config::Config;
 use crate::layout::{self, Gap, Layout, Rule, Tok, Trivia, TriviaItem};
 use crate::{LexState, is_go_line, is_sqlcmd_line};
 
@@ -29,9 +30,14 @@ pub struct Stats {
     pub problems: Vec<(usize, String)>,
 }
 
+/// Formats a file with the default configuration (see `format_with`).
+pub fn format(src: &str) -> (String, Stats) {
+    format_with(src, &Config::default())
+}
+
 /// Formats a file. Never fails: anything that can't be formatted safely is
 /// left exactly as written.
-pub fn format(src: &str) -> (String, Stats) {
+pub fn format_with(src: &str, cfg: &Config) -> (String, Stats) {
     let mut stats = Stats::default();
     let (bom, body) = match src.strip_prefix('\u{feff}') {
         Some(b) => ("\u{feff}", b),
@@ -59,7 +65,7 @@ pub fn format(src: &str) -> (String, Stats) {
     let mut i = 0;
     let flush = |from: usize, to: usize, out: &mut Vec<String>, stats: &mut Stats| {
         if from < to {
-            format_batch(&lines[from..to], &off[from..to], from, out, stats);
+            format_batch(&lines[from..to], &off[from..to], from, cfg, out, stats);
         }
     };
     while i < lines.len() {
@@ -119,6 +125,7 @@ fn format_batch(
     lines: &[&str],
     off: &[bool],
     first_line: usize,
+    cfg: &Config,
     out: &mut Vec<String>,
     stats: &mut Stats,
 ) {
@@ -140,7 +147,7 @@ fn format_batch(
     }
     let mut text = lines.join("\n");
     text.push('\n');
-    let result = catch_unwind(AssertUnwindSafe(|| format_text(&text, off)));
+    let result = catch_unwind(AssertUnwindSafe(|| format_text(&text, off, cfg)));
     match result {
         Ok(Ok(formatted)) => {
             stats.formatted += 1;
@@ -189,16 +196,16 @@ fn options() -> ParserOptions {
     }
 }
 
-pub fn parse(text: &str) -> Option<Vec<Statement>> {
-    let mut parser = Parser::new(&MsSqlDialect {})
+pub fn parse(text: &str, dialect: &dyn Dialect) -> Option<Vec<Statement>> {
+    let mut parser = Parser::new(dialect)
         .with_options(options())
         .try_with_sql(text)
         .ok()?;
     parser.parse_statements().ok()
 }
 
-fn parse_tokens(toks: Vec<TokenWithSpan>) -> Option<Vec<Statement>> {
-    let mut parser = Parser::new(&MsSqlDialect {})
+fn parse_tokens(toks: Vec<TokenWithSpan>, dialect: &dyn Dialect) -> Option<Vec<Statement>> {
+    let mut parser = Parser::new(dialect)
         .with_options(options())
         .with_tokens_with_locations(toks);
     parser.parse_statements().ok()
@@ -206,7 +213,9 @@ fn parse_tokens(toks: Vec<TokenWithSpan>) -> Option<Vec<Statement>> {
 
 /// Formats the text of one batch (ending in a newline). `off` marks the
 /// batch's lines in `@formatter:off` regions. Returns the output lines.
-pub fn format_text(text: &str, off: &[bool]) -> Result<Vec<String>, BatchError> {
+pub fn format_text(text: &str, off: &[bool], cfg: &Config) -> Result<Vec<String>, BatchError> {
+    let dialect = cfg.dialect();
+    let dialect = dialect.as_ref();
     let timing = std::env::var_os("TSQLFMT_TIMING").is_some();
     let t = std::time::Instant::now();
     let lap = |what: &str| {
@@ -214,23 +223,24 @@ pub fn format_text(text: &str, off: &[bool]) -> Result<Vec<String>, BatchError> 
             eprintln!("{what}: {:?}", t.elapsed());
         }
     };
-    let raw_toks = Tokenizer::new(&MsSqlDialect {}, text)
+    let raw_toks = Tokenizer::new(dialect, text)
         .tokenize_with_location()
         .map_err(|_| BatchError::Unparsed)?;
     lap("tokenize");
-    let stmts = parse_tokens(raw_toks.clone()).ok_or(BatchError::Unparsed)?;
+    let stmts = parse_tokens(raw_toks.clone(), dialect).ok_or(BatchError::Unparsed)?;
     lap("parse");
     let mut l = layout_from_tokens(text, &raw_toks, off)?;
+    l.margin = cfg.margin;
     lap("layout");
-    crate::case::apply(&mut l, &stmts);
+    crate::case::apply(&mut l, &stmts, cfg);
     lap("case");
-    crate::build::build(&mut l, &stmts);
+    crate::build::build(&mut l, &stmts, cfg);
     lap("build");
     let lines = layout::print(&l);
     lap("print");
     let mut out = lines.join("\n");
     out.push('\n');
-    verify(&raw_toks, &l, &out)?;
+    verify(&raw_toks, &l, &out, dialect)?;
     lap("verify");
     Ok(lines)
 }
@@ -389,8 +399,13 @@ fn push_tok(
 /// The safety net: the output must have the same tokens as the input,
 /// comments included; only whitespace may differ, and case only for words
 /// the formatter lower-cased.
-fn verify(input: &[TokenWithSpan], l: &Layout, out: &str) -> Result<(), BatchError> {
-    let toks = Tokenizer::new(&MsSqlDialect {}, out)
+fn verify(
+    input: &[TokenWithSpan],
+    l: &Layout,
+    out: &str,
+    dialect: &dyn Dialect,
+) -> Result<(), BatchError> {
+    let toks = Tokenizer::new(dialect, out)
         .tokenize()
         .map_err(|e| BatchError::Mismatch(format!("output doesn't tokenize: {e}")))?;
     let significant = |t: &Token| {

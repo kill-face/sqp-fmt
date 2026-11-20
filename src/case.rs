@@ -3,18 +3,20 @@
 //! A word is an identifier when it starts an `Ident` of the AST: those are
 //! left as written (even `Status`, `Name`, `Value`), except the names of
 //! built-in functions, system data types and `@@` system functions, which
-//! are lower-cased like keywords. Every other unquoted word is a keyword (or
-//! a type or function name that the grammar knows) and is lower-cased if
-//! it's one of sqlparser's keywords or on the lists below; anything else is
-//! left alone.
+//! are cased like keywords. Every other unquoted word is a keyword (or a
+//! type or function name that the grammar knows) and is cased if it's one of
+//! sqlparser's keywords or on the lists below; anything else is left alone.
+//! Keywords, functions and types each take their own setting
+//! (`keyword_case`, `function_case`, `type_case`; lower case by default).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 
 use sqlparser::ast::*;
 use sqlparser::keywords::Keyword;
 use sqlparser::tokenizer::{Location, Token};
 
+use crate::config::{Config, WordCase};
 use crate::layout::Layout;
 
 /// T-SQL built-in functions (scalar, aggregate, ranking, analytic, rowset).
@@ -495,7 +497,15 @@ fn lists() -> &'static Lists {
 #[derive(Default)]
 struct Idents {
     idents: HashSet<Location>,
-    lower: HashSet<Location>,
+    lower: HashMap<Location, Class>,
+}
+
+/// Which case setting applies to a word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Class {
+    Keyword,
+    Function,
+    Type,
 }
 
 impl Idents {
@@ -505,7 +515,7 @@ impl Idents {
             && id.quote_style.is_none()
             && lists().types.contains(&id.value.to_ascii_lowercase())
         {
-            self.lower.insert(id.span.start);
+            self.lower.insert(id.span.start, Class::Type);
         }
     }
 
@@ -514,7 +524,7 @@ impl Idents {
             && id.quote_style.is_none()
             && lists().functions.contains(&id.value.to_ascii_lowercase())
         {
-            self.lower.insert(id.span.start);
+            self.lower.insert(id.span.start, Class::Function);
         }
     }
 }
@@ -528,7 +538,7 @@ impl Visitor for Idents {
             if ident.quote_style.is_none()
                 && lists().vars.contains(&ident.value.to_ascii_lowercase())
             {
-                self.lower.insert(ident.span.start);
+                self.lower.insert(ident.span.start, Class::Function);
             }
         }
         ControlFlow::Continue(())
@@ -546,7 +556,7 @@ impl Visitor for Idents {
                     && id.quote_style.is_none()
                     && DATE_PARTS.contains(&id.value.to_ascii_lowercase().as_str())
                 {
-                    self.lower.insert(id.span.start);
+                    self.lower.insert(id.span.start, Class::Keyword);
                 }
             }
             Expr::Identifier(id) => {
@@ -558,7 +568,7 @@ impl Visitor for Idents {
                         "current_timestamp" | "current_user" | "session_user" | "system_user"
                     )
                 {
-                    self.lower.insert(id.span.start);
+                    self.lower.insert(id.span.start, Class::Function);
                 }
             }
             Expr::Cast { data_type, .. } => self.data_type(data_type),
@@ -614,34 +624,72 @@ impl Visitor for Idents {
     }
 }
 
-/// Lower-cases keywords, built-in functions and system types in `l.toks`.
-pub fn apply(l: &mut Layout, stmts: &[Statement]) {
+/// Sets the case of keywords, built-in functions and system types in
+/// `l.toks` (`keyword_case`, `function_case`, `type_case`).
+///
+/// Identifiers are classed by the AST (a function name, a type name, a date
+/// part, an `@@` function). Other words are classed by name and position: a
+/// system type name is a type (but `table` only after a `@variable`, `xml`
+/// not after `for`, `time` not after `at`); a built-in function name right
+/// before `(` is a function (`cast(`, `convert(`; not `identity (1,1)`);
+/// every other keyword is a keyword.
+pub fn apply(l: &mut Layout, stmts: &[Statement], cfg: &Config) {
     let mut ids = Idents::default();
     for s in stmts {
         let _ = s.visit(&mut ids);
     }
     let lists = lists();
-    for t in &mut l.toks {
+    for i in 0..l.toks.len() {
+        let t = &l.toks[i];
         let Token::Word(w) = &t.token else { continue };
         if w.quote_style.is_some() {
             continue;
         }
-        let lower = if ids.idents.contains(&t.start) {
-            ids.lower.contains(&t.start)
+        let class = if ids.idents.contains(&t.start) {
+            ids.lower.get(&t.start).copied()
         } else {
             let v = w.value.to_ascii_lowercase();
-            w.keyword != Keyword::NoKeyword
+            let prev = i.checked_sub(1).map(|p| &l.toks[p]);
+            let prev_is = |kw: &str| prev.is_some_and(|p| p.is_word(kw));
+            let prev_var = prev.is_some_and(
+                |p| matches!(&p.token, Token::Word(pw) if pw.quote_style.is_none() && pw.value.starts_with('@')),
+            );
+            let next_paren = matches!(l.toks.get(i + 1).map(|n| &n.token), Some(Token::LParen));
+            if lists.types.contains(&v)
+                && (v != "table" || prev_var)
+                && !(v == "xml" && prev_is("for"))
+                && !(v == "time" && prev_is("at"))
+            {
+                Some(Class::Type)
+            } else if (lists.functions.contains(&v) && next_paren && v != "identity")
+                || lists.vars.contains(&v)
+            {
+                Some(Class::Function)
+            } else if w.keyword != Keyword::NoKeyword
                 || lists.types.contains(&v)
                 || lists.functions.contains(&v)
-                || lists.vars.contains(&v)
                 || lists.extra.contains(&v)
-        };
-        if lower {
-            let new = t.text.to_ascii_lowercase();
-            if new != t.text {
-                t.text = new;
-                t.case_changed = true;
+            {
+                Some(Class::Keyword)
+            } else {
+                None
             }
+        };
+        let case = match class {
+            Some(Class::Keyword) => cfg.keyword_case,
+            Some(Class::Function) => cfg.function_case,
+            Some(Class::Type) => cfg.type_case,
+            None => continue,
+        };
+        let t = &mut l.toks[i];
+        let new = match case {
+            WordCase::Lower => t.text.to_ascii_lowercase(),
+            WordCase::Upper => t.text.to_ascii_uppercase(),
+            WordCase::AsIs => continue,
+        };
+        if new != t.text {
+            t.text = new;
+            t.case_changed = true;
         }
     }
 }

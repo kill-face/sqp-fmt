@@ -1,0 +1,5 @@
+margin = 80
+indent = 2
+keyword_case = "upper"
+function_case = "as_is"
+type_case = "upper"

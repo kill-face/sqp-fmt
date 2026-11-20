@@ -1,0 +1,14 @@
+[exists]
+lparen_on_new_line = false
+
+[derived_table]
+lparen_on_new_line = false
+
+[cte]
+lparen_on_new_line = false
+
+[cte_list]
+comma = "trailing"
+
+[merge_when]
+action_on_new_line = false

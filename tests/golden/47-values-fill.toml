@@ -1,0 +1,11 @@
+margin = 60
+
+[values]
+wrap = "if_long"
+
+[values.row]
+wrap = "chop_if_long"
+
+[insert_columns]
+wrap = "never"
+keep_line_breaks = false

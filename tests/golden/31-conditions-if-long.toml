@@ -1,0 +1,18 @@
+margin = 80
+
+[where]
+wrap = "if_long"
+
+[where.groups]
+wrap = "if_long"
+keep_line_breaks = false
+
+[having]
+wrap = "if_long"
+keep_line_breaks = false
+
+[having.groups]
+wrap = "if_long"
+
+[join_on]
+wrap = "if_long"

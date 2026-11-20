@@ -23,9 +23,10 @@ use std::ops::ControlFlow;
 use sqlparser::ast::*;
 use sqlparser::tokenizer::{Location, Span, Token};
 
+use crate::config::{Comma, Config, ListStyle, Wrap, WrapStyle};
 use crate::layout::{Gap, Ind, Layout, Rule, Sp};
 
-pub fn build(l: &mut Layout, stmts: &[Statement]) {
+pub fn build(l: &mut Layout, stmts: &[Statement], cfg: &Config) {
     if l.toks.is_empty() {
         return;
     }
@@ -34,6 +35,9 @@ pub fn build(l: &mut Layout, stmts: &[Statement]) {
         item: None,
         extend: Default::default(),
         exists_paren: None,
+        cfg,
+        ctx: Ctx::Other,
+        chain: None,
     };
     b.keyword_starts(stmts);
     b.top_level(stmts);
@@ -51,6 +55,30 @@ pub(crate) struct Builder<'a> {
     /// Where the `(` of an `exists` subquery goes, set by the condition
     /// being built (`if`, `where` chains).
     pub exists_paren: Option<Ind>,
+    pub cfg: &'a Config,
+    /// The condition the expression being built is part of: its
+    /// parenthesised `and` / `or` groups take that condition's `groups`
+    /// settings.
+    pub ctx: Ctx,
+    /// Set right before building a condition whose top-level `and` / `or`
+    /// chain is laid out by `expr` (see `Expr::BinaryOp`); taken by the next
+    /// `expr` call.
+    pub chain: Option<Ctx>,
+}
+
+/// Which condition an expression is part of (see `Builder::ctx`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ctx {
+    Where,
+    Having,
+    JoinOn,
+    CaseWhen,
+    If,
+    While,
+    MergeOn,
+    MergeWhen,
+    Check,
+    Other,
 }
 
 /// Finds the spans whose keyword the AST leaves out (see `Builder::extend`).
@@ -363,6 +391,199 @@ impl Builder<'_> {
             .all(|w| w[0].1 + 2 == w[1].0 && self.is(w[0].1 + 1, &Token::Comma))
     }
 
+    /// The items of the comma-separated list between the parentheses at
+    /// `open` and `close` (split at the commas outside nested parentheses).
+    pub fn split_commas(&self, open: usize, close: usize) -> Vec<R> {
+        let mut items = Vec::new();
+        let mut depth = 0usize;
+        let mut start = open + 1;
+        for i in open + 1..close {
+            match self.l.toks[i].token {
+                Token::LParen => depth += 1,
+                Token::RParen => depth = depth.saturating_sub(1),
+                Token::Comma if depth == 0 => {
+                    if i > start {
+                        items.push((start, i - 1));
+                    }
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        if close > start {
+            items.push((start, close - 1));
+        }
+        items
+    }
+
+    /// One indent level (`indent`).
+    pub fn ind(&self) -> isize {
+        self.cfg.indent as isize
+    }
+
+    /// The top-level `and` / `or` chain settings of a condition.
+    pub fn chain_style(&self, ctx: Ctx) -> WrapStyle {
+        let c = self.cfg;
+        match ctx {
+            Ctx::Where => c.where_.style(),
+            Ctx::Having => c.having.style(),
+            Ctx::JoinOn => c.join_on.style(),
+            Ctx::CaseWhen => c.case_when.style(),
+            Ctx::If => c.if_condition.style(),
+            Ctx::While => c.while_condition.style(),
+            Ctx::MergeOn => c.merge_on.style(),
+            Ctx::MergeWhen => c.merge_when_condition.style(),
+            Ctx::Check => c.check_constraint.style(),
+            Ctx::Other => c.other_conditions.style(),
+        }
+    }
+
+    /// The parenthesised-group settings of the current condition.
+    pub fn groups_style(&self) -> WrapStyle {
+        let c = self.cfg;
+        match self.ctx {
+            Ctx::Where => c.where_.groups.style(),
+            Ctx::Having => c.having.groups.style(),
+            Ctx::JoinOn => c.join_on.groups.style(),
+            Ctx::CaseWhen => c.case_when.groups.style(),
+            Ctx::If => c.if_condition.groups.style(),
+            Ctx::While => c.while_condition.groups.style(),
+            Ctx::MergeOn => c.merge_on.groups.style(),
+            Ctx::MergeWhen => c.merge_when_condition.groups.style(),
+            Ctx::Check => c.check_constraint.groups.style(),
+            Ctx::Other => c.other_conditions.groups.style(),
+        }
+    }
+
+    /// Runs `f` with the condition context set to `ctx`.
+    pub fn in_ctx(&mut self, ctx: Ctx, f: impl FnOnce(&mut Self)) {
+        let saved = self.ctx;
+        self.ctx = ctx;
+        f(self);
+        self.ctx = saved;
+    }
+
+    /// A comma-separated list without parentheses of its own (`select`
+    /// items, `group by`, `values` rows, `exec` arguments), laid out by
+    /// `st`. Broken, `, item` starts a line at `comma` (leading commas), or
+    /// `item` at `comma` + 2 (trailing). Kept line breaks of a `never` list
+    /// are re-indented relative to `anchor`.
+    pub fn bare_list(&mut self, items: &[R], st: ListStyle, comma: Ind, anchor: usize) {
+        let (Some(&first), Some(&last)) = (items.first(), items.last()) else {
+            return;
+        };
+        if items.len() < 2 || !self.comma_separated(items) {
+            return;
+        }
+        let item_ind = shift(comma, 2);
+        match st.wrap {
+            Wrap::Never if st.keep => self.comma_flat(items, anchor),
+            Wrap::Never => {
+                for w in items.windows(2) {
+                    self.set(w[0].1 + 1, Rule::Flat(Sp::No));
+                    self.set(w[1].0, Rule::Flat(Sp::One));
+                }
+            }
+            Wrap::IfLong => {
+                let g = self.group(first.0, last.1, st.keep);
+                for w in items.windows(2) {
+                    let (c, b) = (w[0].1 + 1, w[1].0);
+                    if st.comma == Comma::Leading && !self.l.trivia[b].has_comments() {
+                        self.set(c, Rule::Fill(g, comma, Sp::No));
+                        self.set(b, Rule::FlatIn(g, Sp::One));
+                    } else {
+                        self.set(c, Rule::FlatIn(g, Sp::No));
+                        self.set(b, Rule::Fill(g, item_ind, Sp::One));
+                    }
+                }
+            }
+            Wrap::ChopIfLong | Wrap::Always => {
+                let g = self.group(first.0, last.1, st.keep);
+                self.l.groups[g].force = st.wrap == Wrap::Always;
+                if st.comma == Comma::Leading {
+                    self.comma_chop(items, g, comma);
+                } else {
+                    for w in items.windows(2) {
+                        self.set(w[0].1 + 1, Rule::FlatIn(g, Sp::No));
+                        self.set(w[1].0, Rule::BreakIf(g, item_ind, Sp::One));
+                    }
+                }
+            }
+        }
+    }
+
+    /// The inside of a parenthesised comma-separated list `( a, b, c )`
+    /// (not the gap before the `(`), laid out by `st`: `never` on one line;
+    /// `if_long` filled, continuation lines under the first item (leading
+    /// commas under the `(`, which gets a space after it); `chop_if_long` /
+    /// `always` a block: `(` ends its line, items 2 in from the `(`, `)`
+    /// under it. Kept line breaks of a `never` list are re-indented
+    /// relative to `anchor`.
+    pub fn paren_list(
+        &mut self,
+        open: usize,
+        items: &[R],
+        close: usize,
+        st: ListStyle,
+        anchor: usize,
+    ) {
+        let (Some(&first), Some(&last)) = (items.first(), items.last()) else {
+            return;
+        };
+        if first.0 != open + 1 || last.1 + 1 != close || !self.comma_separated(items) {
+            return;
+        }
+        match st.wrap {
+            Wrap::Never if st.keep => {
+                self.set(first.0, Rule::Keep(Ind::Src(anchor), Sp::No));
+                self.comma_flat(items, anchor);
+                self.set(close, Rule::Keep(Ind::Src(anchor), Sp::No));
+            }
+            Wrap::Never => {
+                self.set(first.0, Rule::Flat(Sp::No));
+                for w in items.windows(2) {
+                    self.set(w[0].1 + 1, Rule::Flat(Sp::No));
+                    self.set(w[1].0, Rule::Flat(Sp::One));
+                }
+                self.set(close, Rule::Flat(Sp::No));
+            }
+            Wrap::IfLong => {
+                let g = self.group(open, close, st.keep);
+                let leading = st.comma == Comma::Leading;
+                if leading {
+                    self.set(first.0, Rule::SpaceIf(g, Sp::One, Sp::No));
+                } else {
+                    self.set(first.0, Rule::Flat(Sp::No));
+                }
+                for w in items.windows(2) {
+                    let (c, b) = (w[0].1 + 1, w[1].0);
+                    if leading {
+                        self.set(c, Rule::Fill(g, Ind::Col(open, 0), Sp::No));
+                        self.set(b, Rule::FlatIn(g, Sp::One));
+                    } else {
+                        self.set(c, Rule::FlatIn(g, Sp::No));
+                        self.set(b, Rule::Fill(g, Ind::Col(open, 1), Sp::One));
+                    }
+                }
+                self.set(close, Rule::Flat(Sp::No));
+            }
+            Wrap::ChopIfLong | Wrap::Always => {
+                let g = self.group(open, close, st.keep);
+                self.l.groups[g].force = st.wrap == Wrap::Always;
+                self.set(first.0, Rule::BreakIf(g, Ind::Col(open, 2), Sp::No));
+                if st.comma == Comma::Leading {
+                    self.comma_chop(items, g, Ind::Col(open, 0));
+                } else {
+                    for w in items.windows(2) {
+                        self.set(w[0].1 + 1, Rule::FlatIn(g, Sp::No));
+                        self.set(w[1].0, Rule::BreakIf(g, Ind::Col(open, 2), Sp::One));
+                    }
+                }
+                self.set(close, Rule::BreakIf(g, Ind::Col(open, 0), Sp::No));
+            }
+        }
+    }
+
     /// Recurses into the outermost expressions, queries and statements
     /// below `node`, keeping the source layout around them. `is_node`: the
     /// node is itself an `Expr` / `Query` / `Statement` (and so visits
@@ -454,7 +675,7 @@ impl Builder<'_> {
             let here = if is_end && !open.is_empty() {
                 Ind::Col(open.pop().unwrap(), 0)
             } else {
-                open.last().map_or(ind, |&b| Ind::Col(b, 4))
+                open.last().map_or(ind, |&b| Ind::Col(b, self.ind()))
             };
             self.stmt_start(r.0, here);
             self.statement(s);
@@ -484,5 +705,15 @@ impl Builder<'_> {
         } else {
             self.set(i, Rule::Break(ind));
         }
+    }
+}
+
+/// `ind` moved `by` columns right.
+pub(crate) fn shift(ind: Ind, by: isize) -> Ind {
+    match ind {
+        Ind::Col(t, off) => Ind::Col(t, off + by),
+        Ind::LineOf(t, off) => Ind::LineOf(t, off + by),
+        Ind::Abs(c) => Ind::Abs((c as isize + by).max(0) as usize),
+        other => other,
     }
 }

@@ -1,0 +1,11 @@
+margin = 60
+
+[in_list]
+wrap = "chop_if_long"
+comma = "trailing"
+
+[function_args]
+wrap = "always"
+
+[exec_args]
+wrap = "always"

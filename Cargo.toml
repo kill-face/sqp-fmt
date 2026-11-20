@@ -10,6 +10,9 @@ license = "MIT"
 # Path dependency while both are developed side by side; switch to the git
 # fork (kill-face/datafusion-sqlparser-rs, bookmark `tsql`) for Nix builds.
 sqlparser = { path = "../datafusion-sqlparser-rs", features = ["visitor"] }
+# The configuration file (tsqlfmt.toml).
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.2.1"
 
 [profile.release]
 lto = true

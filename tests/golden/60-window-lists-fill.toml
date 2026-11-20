@@ -1,0 +1,5 @@
+margin = 70
+
+[window.order_by]
+wrap = "if_long"
+comma = "trailing"

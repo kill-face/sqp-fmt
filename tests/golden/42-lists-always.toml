@@ -1,0 +1,12 @@
+[select_list]
+wrap = "always"
+comma = "trailing"
+
+[group_by]
+wrap = "chop_if_long"
+comma = "trailing"
+keep_line_breaks = false
+
+[order_by]
+wrap = "if_long"
+comma = "trailing"

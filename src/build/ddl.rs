@@ -3,7 +3,8 @@
 use sqlparser::ast::*;
 use sqlparser::tokenizer::Token;
 
-use super::{Builder, R};
+use super::{Builder, Ctx, R};
+use crate::config::{Comma, Wrap};
 use crate::layout::{Ind, Rule, Sp};
 
 impl Builder<'_> {
@@ -45,7 +46,11 @@ impl Builder<'_> {
         for c in constraints {
             let Some(cr) = self.rng(c) else { return false };
             self.src(cr);
-            self.generic(c, false);
+            if matches!(c, TableConstraint::Check(_)) {
+                self.check_generic(c);
+            } else {
+                self.generic(c, false);
+            }
             self.references_break(cr);
             elems.push(cr);
         }
@@ -64,15 +69,22 @@ impl Builder<'_> {
         if !self.is(open, &Token::LParen) || !self.is(close, &Token::RParen) {
             return true;
         }
+        self.set(open, Rule::Break(Ind::Col(base, 0)));
+        for e in &elems {
+            self.set(e.0, Rule::Break(Ind::Col(base, self.ind())));
+        }
+        let leading = self.cfg.create_table.comma == Comma::Leading;
         for w in elems.windows(2) {
             let (a, b) = (w[0], w[1]);
             if a.1 + 2 == b.0 && self.is(a.1 + 1, &Token::Comma) {
-                self.set(a.1 + 1, Rule::Flat(Sp::No));
+                if leading {
+                    // `  , Name …`
+                    self.set(a.1 + 1, Rule::Break(Ind::Col(base, self.ind() - 2)));
+                    self.set(b.0, Rule::Flat(Sp::One));
+                } else {
+                    self.set(a.1 + 1, Rule::Flat(Sp::No));
+                }
             }
-        }
-        self.set(open, Rule::Break(Ind::Col(base, 0)));
-        for e in &elems {
-            self.set(e.0, Rule::Break(Ind::Col(base, 4)));
         }
         self.set(close, Rule::Break(Ind::Col(base, 0)));
         true
@@ -90,7 +102,9 @@ impl Builder<'_> {
         if ty <= cr.1 {
             // The type (or a computed column's `as`) lines up.
             self.set(ty, Rule::Flat(Sp::One));
-            self.align(ty, types, name);
+            if self.cfg.create_table.align_columns {
+                self.align(ty, types, name);
+            }
         }
         let computed = type_end == name;
         if !computed {
@@ -108,6 +122,7 @@ impl Builder<'_> {
             match &o.option {
                 ColumnOption::Default(e) => self.expr(e),
                 ColumnOption::Null | ColumnOption::NotNull => {}
+                opt @ ColumnOption::Check(_) => self.check_generic(opt),
                 opt => self.generic(opt, false),
             }
             let identity = matches!(o.option, ColumnOption::Identity(_));
@@ -126,14 +141,17 @@ impl Builder<'_> {
                     self.set(i, Rule::Flat(sp));
                 }
             }
-            if o.name.is_some() {
-                // A named constraint: on its own line 4 in.
-                self.set(os, Rule::Break(Ind::Col(name, 4)));
+            if o.name.is_some() && self.cfg.create_table.named_constraint_on_new_line {
+                // A named constraint: on its own line one indent in.
+                self.set(os, Rule::Break(Ind::Col(name, self.ind())));
+            } else if o.name.is_some() {
+                self.set(os, Rule::Keep(Ind::Col(name, self.ind()), Sp::One));
             } else {
-                self.set(os, Rule::Keep(Ind::Col(name, 4), Sp::One));
+                self.set(os, Rule::Keep(Ind::Col(name, self.ind()), Sp::One));
                 if matches!(o.option, ColumnOption::Null | ColumnOption::NotNull)
                     && !self.nl_before(os)
                     && !computed
+                    && self.cfg.create_table.align_columns
                 {
                     self.align_any(os, nulls);
                 }
@@ -147,8 +165,12 @@ impl Builder<'_> {
     fn references_break(&mut self, r: R) {
         if let Some(k) = self.find_kw(r.0 + 1, r.1, "references") {
             let base = self.find_kw(r.0, k, "foreign").unwrap_or(r.0);
-            let ind = Ind::LineOf(base, 4);
-            self.set(k, Rule::Break(ind));
+            let ind = Ind::LineOf(base, self.ind());
+            if self.cfg.foreign_key.references_on_new_line {
+                self.set(k, Rule::Break(ind));
+            } else {
+                self.set(k, Rule::Keep(ind, Sp::One));
+            }
             let mut i = k + 1;
             while let Some(on) = self.find_kw(i, r.1, "on") {
                 self.set(on, Rule::Keep(ind, Sp::One));
@@ -165,7 +187,7 @@ impl Builder<'_> {
             return;
         };
         if self.is_kw(tr.0 - 1, "on") {
-            self.set(tr.0 - 1, Rule::Break(Ind::Col(create, 4)));
+            self.set(tr.0 - 1, Rule::Break(Ind::Col(create, self.ind())));
             self.set(tr.0, Rule::Flat(Sp::One));
         }
         // ( columns ): on the `on` line, or the next line 4 in if it doesn't
@@ -175,7 +197,10 @@ impl Builder<'_> {
             && let Some(close) = self.close_paren(open)
         {
             let g = self.group(tr.0, close, true);
-            self.set(open, Rule::BreakIf(g, Ind::LineOf(tr.0, 4), Sp::One));
+            self.set(
+                open,
+                Rule::BreakIf(g, Ind::LineOf(tr.0, self.ind()), Sp::One),
+            );
             self.set(open + 1, Rule::Flat(Sp::No));
             self.set(close, Rule::Flat(Sp::No));
             for i in open + 2..close {
@@ -183,9 +208,18 @@ impl Builder<'_> {
                     self.set(i, Rule::Flat(Sp::No));
                 }
             }
+            let st = self.cfg.index_columns.style();
+            if st != crate::config::KeptList::default().style() {
+                let items = self.split_commas(open, close);
+                self.paren_list(open, &items, close, st, tr.0);
+                if st.wrap == crate::config::Wrap::Always {
+                    // Always a block: its `(` stays on the `on` line.
+                    self.set(open, Rule::Flat(Sp::One));
+                }
+            }
             for kw in ["include", "where", "with"] {
                 if let Some(k) = self.find_kw(close + 1, r.1, kw) {
-                    self.set(k, Rule::Keep(Ind::Col(create, 4), Sp::One));
+                    self.set(k, Rule::Keep(Ind::Col(create, self.ind()), Sp::One));
                 }
             }
         }
@@ -205,17 +239,53 @@ impl Builder<'_> {
                 continue;
             };
             self.src(or);
-            self.generic(op, false);
+            if matches!(
+                op,
+                AlterTableOperation::AddConstraint {
+                    constraint: TableConstraint::Check(_),
+                    ..
+                }
+            ) {
+                self.check_generic(op);
+            } else {
+                self.generic(op, false);
+            }
             self.references_break(or);
             ops.push(or);
         }
+        // The first operation starts a line one indent in; the others
+        // follow `alter_table`.
+        let st = self.cfg.alter_table.clone();
+        let ind = Ind::Col(alter, self.ind());
+        let g = match (ops.first(), ops.last()) {
+            (Some(f), Some(l)) if st.wrap == Wrap::ChopIfLong => {
+                Some(self.group(f.0, l.1, st.keep_line_breaks))
+            }
+            _ => None,
+        };
         for (k, or) in ops.iter().enumerate() {
             if k == 0 {
-                self.set(or.0, Rule::Break(Ind::Col(alter, 4)));
+                self.set(or.0, Rule::Break(ind));
             } else if self.is(or.0 - 1, &Token::Comma) {
                 self.set(or.0 - 1, Rule::Flat(Sp::No));
-                self.set(or.0, Rule::Keep(Ind::Col(alter, 4), Sp::One));
+                let rule = match (st.wrap, g) {
+                    (Wrap::Always, _) => Rule::Break(ind),
+                    (_, Some(g)) => Rule::BreakIf(g, ind, Sp::One),
+                    _ if st.keep_line_breaks => Rule::Keep(ind, Sp::One),
+                    _ => Rule::Flat(Sp::One),
+                };
+                self.set(or.0, rule);
             }
         }
+    }
+
+    /// A `check` constraint (column, table or `alter table … add`): its
+    /// condition is laid out by `check_constraint`.
+    fn check_generic<V: Visit>(&mut self, node: &V) {
+        self.in_ctx(Ctx::Check, |b| {
+            b.chain = Some(Ctx::Check);
+            b.generic(node, false);
+            b.chain = None;
+        });
     }
 }

@@ -1,0 +1,11 @@
+margin = 50
+
+[index_columns]
+wrap = "if_long"
+comma = "trailing"
+
+[view_columns]
+wrap = "if_long"
+
+[alter_table]
+wrap = "chop_if_long"

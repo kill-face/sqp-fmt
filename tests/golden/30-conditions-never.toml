@@ -1,0 +1,16 @@
+[where]
+wrap = "never"
+keep_line_breaks = false
+
+[where.groups]
+wrap = "never"
+keep_line_breaks = false
+
+[having]
+wrap = "never"
+
+[having.groups]
+wrap = "never"
+
+[join_on]
+keep_line_breaks = false

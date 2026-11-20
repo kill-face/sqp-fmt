@@ -1,0 +1,12 @@
+margin = 60
+
+[in_list]
+wrap = "if_long"
+
+[function_args]
+wrap = "never"
+keep_line_breaks = false
+
+[exec_args]
+wrap = "if_long"
+comma = "trailing"

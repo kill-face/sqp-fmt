@@ -1,0 +1,13 @@
+margin = 60
+
+[values]
+wrap = "chop_if_long"
+comma = "trailing"
+
+[values.row]
+wrap = "never"
+keep_line_breaks = false
+
+[insert_columns]
+wrap = "always"
+comma = "trailing"

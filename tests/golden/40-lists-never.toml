@@ -1,0 +1,11 @@
+[select_list]
+wrap = "never"
+keep_line_breaks = false
+align_aliases = false
+
+[group_by]
+wrap = "always"
+
+[order_by]
+wrap = "chop_if_long"
+comma = "trailing"

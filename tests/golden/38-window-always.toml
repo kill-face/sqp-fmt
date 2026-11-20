@@ -1,0 +1,9 @@
+[window]
+wrap = "always"
+
+[window.partition_by]
+wrap = "always"
+comma = "trailing"
+
+[window.order_by]
+wrap = "chop_if_long"

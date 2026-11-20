@@ -4,11 +4,17 @@
 use sqlparser::ast::*;
 use sqlparser::tokenizer::Token;
 
-use super::{Builder, R};
+use super::{Builder, Ctx, R};
+use crate::config::{Comma, Wrap};
 use crate::layout::{Ind, Rule, Sp};
 
 impl Builder<'_> {
+    /// A query: its conditions' contexts are its own.
     pub fn query(&mut self, q: &Query) {
+        self.in_ctx(Ctx::Other, |b| b.query_inner(q));
+    }
+
+    fn query_inner(&mut self, q: &Query) {
         let Some(r) = self.rng(q) else {
             self.generic(q, true);
             return;
@@ -66,6 +72,7 @@ impl Builder<'_> {
             return;
         };
         let mut prev_close: Option<usize> = None;
+        let mut first_name: Option<usize> = None;
         for cte in &w.cte_tables {
             let Some(close) = self.att(&cte.closing_paren_token) else {
                 return;
@@ -76,27 +83,47 @@ impl Builder<'_> {
             let Some(name) = self.at(cte.alias.name.span.start) else {
                 return;
             };
-            if let Some(pc) = prev_close {
-                // `, B as`
-                if pc + 1 < name && self.is(pc + 1, &Token::Comma) && pc + 2 == name {
+            let first_name = *first_name.get_or_insert(name);
+            if let Some(pc) = prev_close
+                && pc + 1 < name
+                && self.is(pc + 1, &Token::Comma)
+                && pc + 2 == name
+            {
+                if self.cfg.cte_list.comma == Comma::Leading {
+                    // `   , B as`
                     self.set(pc + 1, Rule::Break(Ind::LineOf(with_tok, 3)));
                     self.set(name, Rule::Flat(Sp::One));
+                } else {
+                    // `),` and `B as` under the first name.
+                    self.set(pc + 1, Rule::Flat(Sp::No));
+                    self.set(name, Rule::Break(Ind::Col(first_name, 0)));
                 }
             }
             // `as (` : `(` on its own line, 4 in from `with` when there are
             // several CTEs, 4 in from the CTE's name when there's one.
             let paren = if w.cte_tables.len() == 1 {
-                Ind::Col(name, 4)
+                Ind::Col(name, self.ind())
             } else {
-                Ind::LineOf(with_tok, 4)
+                Ind::LineOf(with_tok, self.ind())
             };
-            self.set(open, Rule::Break(paren));
+            let own_line = self.cfg.cte.lparen_on_new_line;
+            if own_line {
+                self.set(open, Rule::Break(paren));
+            } else if self.is_kw(open - 1, "as") {
+                self.set(open, Rule::Flat(Sp::One));
+            }
             if let Some(cr) = self.rng(cte.query.as_ref())
                 && cr.0 == open + 1
                 && cr.1 + 1 == close
             {
-                self.set(cr.0, Rule::Break(Ind::Col(open, 4)));
-                self.set(close, Rule::Break(Ind::Col(open, 0)));
+                if own_line {
+                    self.set(cr.0, Rule::Break(Ind::Col(open, self.ind())));
+                    self.set(close, Rule::Break(Ind::Col(open, 0)));
+                } else {
+                    // `as (` ends the line; the query one indent in from it.
+                    self.set(cr.0, Rule::Break(Ind::LineOf(open, self.ind())));
+                    self.set(close, Rule::Break(Ind::LineOf(open, 0)));
+                }
             }
             self.query(&cte.query);
             prev_close = Some(close);
@@ -148,7 +175,7 @@ impl Builder<'_> {
     /// `( query )` laid out as a block: the query on the next line 4 in from
     /// the `(`, `)` under the `(`.
     pub fn subquery_block(&mut self, open: usize, qr: R, close: usize) {
-        self.set(qr.0, Rule::Break(Ind::Col(open, 4)));
+        self.set(qr.0, Rule::Break(Ind::Col(open, self.ind())));
         self.set(close, Rule::Break(Ind::Col(open, 0)));
     }
 
@@ -172,7 +199,7 @@ impl Builder<'_> {
                 return;
             }
             // Like a column list: `( a, b\n, c)` once it wraps.
-            self.column_list(&items);
+            self.column_list(&items, self.cfg.values.row.style());
             rows.push((open, close));
         }
         if rows.is_empty() || !self.comma_separated(&rows) {
@@ -183,17 +210,16 @@ impl Builder<'_> {
         let mut comma = Ind::Col(rows[0].0, -2);
         if rows[0].0 > r.0 {
             if self.l.trivia[rows[0].0].forces_break() {
-                self.set(rows[0].0, Rule::Break(Ind::Col(r.0, 4)));
+                self.set(rows[0].0, Rule::Break(Ind::Col(r.0, self.ind())));
                 comma = Ind::Col(r.0, 5);
             } else {
                 self.set(rows[0].0, Rule::Flat(Sp::One));
             }
         }
         if rows.len() > 1 {
-            // Several rows: one per line.
-            let g = self.group(rows[0].0, rows.last().unwrap().1, true);
-            self.l.groups[g].force = true;
-            self.comma_chop(&rows, g, comma);
+            // Several rows: one per line (by default).
+            let st = self.cfg.values.style();
+            self.bare_list(&rows, st, comma, r.0);
         }
     }
 
@@ -232,16 +258,19 @@ impl Builder<'_> {
             // A comment before the first item puts it on a line of its own,
             // 4 in from `select`; leading commas stay where they'd be with
             // the item on the `select` line.
+            let st = self.cfg.select_list.style();
             let comma = if self.l.trivia[first.0].forces_break() && first.0 > sel {
-                self.set(first.0, Rule::Break(Ind::Col(sel, 4)));
-                Ind::Col(sel, 5)
+                self.set(first.0, Rule::Break(Ind::Col(sel, self.ind())));
+                if st.comma == Comma::Leading {
+                    Ind::Col(sel, 5)
+                } else {
+                    Ind::Col(sel, self.ind() - 2)
+                }
             } else {
                 Ind::Col(first.0, -2)
             };
-            if items.len() == s.projection.len() && self.comma_separated(&items) && items.len() > 1
-            {
-                let g = self.group(first.0, items.last().unwrap().1, true);
-                self.comma_chop(&items, g, comma);
+            if items.len() == s.projection.len() {
+                self.bare_list(&items, st, comma, sel);
             }
         }
         let mut last = items.last().map_or(sel, |x| x.1);
@@ -286,9 +315,9 @@ impl Builder<'_> {
                 let wt = wr.0 - 1;
                 self.set(wt, Rule::Break(clause));
                 self.set(wr.0, Rule::Flat(Sp::One));
-                self.condition(w, wt, 2);
+                self.condition(w, wt, 2, Ctx::Where);
             } else {
-                self.expr(w);
+                self.in_ctx(Ctx::Where, |b| b.expr(w));
             }
             last = wr.1;
         }
@@ -307,7 +336,8 @@ impl Builder<'_> {
                     self.set(g0.0 - 1, Rule::Flat(Sp::One));
                     self.set(g0.0, Rule::Flat(Sp::One));
                 }
-                self.comma_flat(&gr, g0.0);
+                let st = self.cfg.group_by.style();
+                self.bare_list(&gr, st, Ind::Col(g0.0, -2), g0.0);
                 last = gr.last().unwrap().1;
             }
         }
@@ -319,9 +349,9 @@ impl Builder<'_> {
                 let ht = hr.0 - 1;
                 self.set(ht, Rule::Break(clause));
                 self.set(hr.0, Rule::Flat(Sp::One));
-                self.condition(h, ht, 2);
+                self.condition(h, ht, 2, Ctx::Having);
             } else {
-                self.expr(h);
+                self.in_ctx(Ctx::Having, |b| b.expr(h));
             }
             last = hr.1;
         }
@@ -352,7 +382,11 @@ impl Builder<'_> {
                         self.set(k, Rule::Keep(Ind::Src(ir.0), Sp::One));
                     } else {
                         self.set(k, Rule::Flat(Sp::One));
-                        self.align_any(k, a);
+                        if self.cfg.select_list.align_aliases
+                            && matches!(self.cfg.select_list.wrap, Wrap::ChopIfLong | Wrap::Always)
+                        {
+                            self.align_any(k, a);
+                        }
                     }
                 } else if al < er.0 {
                     // alias = expr
@@ -386,13 +420,27 @@ impl Builder<'_> {
             for i in jr.0 + 1..rr.0 {
                 self.set(i, Rule::Flat(Sp::One));
             }
-            // A derived table's `(` goes on its own line under the join.
-            if matches!(j.relation, TableFactor::Derived { .. }) {
+            // A derived table's `(` goes on its own line under the join (or
+            // ends the join's line).
+            let derived = matches!(j.relation, TableFactor::Derived { .. });
+            let own_line = self.cfg.derived_table.lparen_on_new_line;
+            if derived && own_line {
                 self.set(rr.0, Rule::Break(Ind::Col(jr.0, 0)));
             } else {
                 self.set(rr.0, Rule::Flat(Sp::One));
             }
             self.table_factor(&j.relation);
+            if derived
+                && !own_line
+                && let TableFactor::Derived { subquery, .. } = &j.relation
+                && let Some(qr) = self.rng(subquery.as_ref())
+                && self.is(qr.0 - 1, &Token::LParen)
+                && self.is(qr.1 + 1, &Token::RParen)
+            {
+                let open = qr.0 - 1;
+                self.set(qr.0, Rule::Break(Ind::LineOf(open, self.ind())));
+                self.set(qr.1 + 1, Rule::Break(Ind::LineOf(open, 0)));
+            }
             let constraint = match &j.join_operator {
                 JoinOperator::Join(c)
                 | JoinOperator::Inner(c)
@@ -408,12 +456,12 @@ impl Builder<'_> {
                     && self.is_kw(er.0 - 1, "on")
                 {
                     let on = er.0 - 1;
-                    self.set(on, Rule::Break(Ind::Col(jr.0, 4)));
+                    self.set(on, Rule::Break(Ind::Col(jr.0, self.ind())));
                     self.set(er.0, Rule::Flat(Sp::One));
                     self.condition_keep(e, on);
                     continue;
                 }
-                self.expr(e);
+                self.in_ctx(Ctx::JoinOn, |b| b.expr(e));
             }
         }
     }
@@ -446,7 +494,7 @@ impl Builder<'_> {
                         && cols.len() == a.columns.len()
                         && a.columns.iter().all(|c| c.data_type.is_none())
                     {
-                        self.column_list(&cols);
+                        self.column_list(&cols, crate::config::FilledList::default().style());
                     }
                 }
             }
@@ -468,7 +516,8 @@ impl Builder<'_> {
                     self.set(obr.0 + 1, Rule::Flat(Sp::One));
                     self.set(f.0, Rule::Flat(Sp::One));
                 }
-                self.comma_flat(&items, f.0);
+                let st = self.cfg.order_by.style();
+                self.bare_list(&items, st, Ind::Col(f.0, -2), f.0);
             }
         } else {
             self.generic(ob, false);

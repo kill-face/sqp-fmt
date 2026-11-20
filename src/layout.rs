@@ -9,9 +9,6 @@
 
 use sqlparser::tokenizer::{Location, Token, Whitespace};
 
-/// Right margin.
-pub const MARGIN: usize = 120;
-
 /// One non-whitespace, non-comment token.
 #[derive(Debug, Clone)]
 pub struct Tok {
@@ -199,6 +196,8 @@ pub struct Layout {
     pub gaps: Vec<Gap>,
     pub groups: Vec<Group>,
     pub align_groups: usize,
+    /// Right margin.
+    pub margin: usize,
     /// Tokens inside `@formatter:off` regions (printed by the `Raw` trivia).
     pub raw: Vec<bool>,
     /// Indent (in chars) of each source line.
@@ -476,11 +475,21 @@ impl Printer<'_> {
             Rule::FlatIn(_, sp) => flat(sp),
             Rule::SpaceIf(g, b, f) => flat(if self.broken[g].unwrap_or(true) { b } else { f }),
             Rule::Fill(g, ind, sp) => {
-                let nl_after = matches!(l.gaps.get(i + 1).map(|g| g.rule), Some(Rule::FlatIn(gg, _)) if gg == g)
-                    && l.trivia[i + 1].newlines() > 0;
+                // A kept line break may sit on the other side of a comma:
+                // after it for a fill gap before the comma (leading
+                // commas), before it for a fill gap after it (trailing).
+                let comma = |k: usize| matches!(l.toks[k].token, Token::Comma);
+                let kept_at = |k: usize| {
+                    matches!(l.gaps.get(k).map(|g| g.rule), Some(Rule::FlatIn(gg, _)) if gg == g)
+                        && l.trivia[k].newlines() > 0
+                };
+                let nl_after = comma(i) && kept_at(i + 1);
+                let nl_before = !comma(i) && comma(i - 1) && kept_at(i - 1);
                 if self.broken[g] == Some(false) {
                     flat(sp)
-                } else if (l.groups[g].keep && (nl || nl_after)) || !self.chunk_fits(i, g, sp) {
+                } else if (l.groups[g].keep && (nl || nl_after || nl_before))
+                    || !self.chunk_fits(i, g, sp)
+                {
                     Decision::Break(self.indent(ind, i))
                 } else {
                     flat(sp)
@@ -509,13 +518,24 @@ impl Printer<'_> {
                 {
                     return true;
                 }
+                // An element that will be broken anyway (a group the author
+                // wrote over several lines, or one that's always broken)
+                // starts a line of its own, as it does when it's too long:
+                // the same either way, so formatting again changes nothing.
+                if let Rule::BreakIf(gg, ..) | Rule::Fill(gg, ..) = l.gaps[k].rule
+                    && gg != g
+                    && l.groups[gg].first >= i
+                    && ((l.groups[gg].keep && l.trivia[k].newlines() > 0) || l.groups[gg].force)
+                {
+                    return false;
+                }
                 match self.flat_spacing(k, g) {
                     None => return true,
                     Some(s) => width = self.pad_to_align(k, width + s),
                 }
             }
             width += l.toks[k].width();
-            if width > MARGIN {
+            if width > l.margin {
                 return false;
             }
             if k > last + 8 {
@@ -727,7 +747,7 @@ impl Printer<'_> {
                 return true;
             }
             width += t.width();
-            if width > MARGIN {
+            if width > l.margin {
                 return true;
             }
         }
@@ -747,7 +767,7 @@ impl Printer<'_> {
                 Some(s) => width = self.pad_to_align(i, width + s),
             }
             width += l.toks[i].width();
-            if width > MARGIN {
+            if width > l.margin {
                 return true;
             }
             i += 1;
@@ -792,6 +812,12 @@ impl Printer<'_> {
                     && self.broken[gg] == Some(true)
                     && l.groups[gg].first < l.groups[g].first
                 {
+                    return None;
+                }
+                // A group that's always broken (a block the author wrote
+                // over several lines, a `wrap = "always"` list) can't be on
+                // one line, so neither can a group around it.
+                if gg != g && l.groups[gg].force && matches!(l.gaps[i].rule, Rule::BreakIf(..)) {
                     return None;
                 }
                 if gg != g && l.groups[gg].keep && nl {

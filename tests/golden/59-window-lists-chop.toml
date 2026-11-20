@@ -1,0 +1,8 @@
+margin = 70
+
+[window.partition_by]
+wrap = "chop_if_long"
+comma = "trailing"
+
+[window.order_by]
+wrap = "always"

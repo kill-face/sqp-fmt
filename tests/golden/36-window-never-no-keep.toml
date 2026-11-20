@@ -1,0 +1,9 @@
+[window]
+wrap = "never"
+keep_line_breaks = false
+
+[window.partition_by]
+keep_line_breaks = false
+
+[window.frame]
+keep_line_breaks = false

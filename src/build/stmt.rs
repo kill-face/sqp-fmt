@@ -4,11 +4,17 @@
 use sqlparser::ast::*;
 use sqlparser::tokenizer::Token;
 
-use super::{Builder, R};
+use super::{Builder, Ctx, R};
+use crate::config::Comma;
 use crate::layout::{Ind, Rule, Sp};
 
 impl Builder<'_> {
+    /// A statement: its conditions' contexts are its own.
     pub fn statement(&mut self, s: &Statement) {
+        self.in_ctx(Ctx::Other, |b| b.statement_inner(s));
+    }
+
+    fn statement_inner(&mut self, s: &Statement) {
         let Some(r) = self.rng(s) else {
             self.generic(s, true);
             return;
@@ -54,6 +60,15 @@ impl Builder<'_> {
                 }
             }
             Statement::Set(set) => self.set_stmt(set, r),
+            Statement::Execute {
+                name: Some(name),
+                parameters,
+                has_parentheses: false,
+                ..
+            } if !parameters.is_empty() => {
+                self.generic(s, true);
+                self.exec_args(name, parameters.len(), r);
+            }
             _ => self.generic(s, true),
         }
     }
@@ -61,7 +76,7 @@ impl Builder<'_> {
     /// `begin [try|catch] … end [try|catch]` starting at token `begin`: the
     /// statements one indent in, `end` under `begin`.
     pub fn block(&mut self, begin: usize, stmts: &[Statement], end: Option<usize>, r: R) {
-        self.statements(stmts, Ind::Col(begin, 4));
+        self.statements(stmts, Ind::Col(begin, self.ind()));
         let end = end.or_else(|| self.find_end(begin, stmts, r));
         if let Some(e) = end
             && e > begin
@@ -88,34 +103,43 @@ impl Builder<'_> {
                 let Some(begin) = self.att(&bes.begin_token) else {
                     return;
                 };
-                self.set(begin, Rule::Break(Ind::Col(head, 4)));
+                self.set(begin, Rule::Break(Ind::Col(head, self.ind())));
                 let end = self.att(&bes.end_token);
                 let r = (begin, end.unwrap_or(begin));
                 self.src(r);
                 self.block(begin, &bes.statements, end, r);
             }
             ConditionalStatements::Sequence { statements } => {
-                self.statements(statements, Ind::Col(head, 4));
+                self.statements(statements, Ind::Col(head, self.ind()));
             }
         }
     }
 
     /// An `if` / `while` condition: an `exists (` in it (at its top level,
     /// or in an `and` / `or` chain) puts the `(` 4 in from `if`.
-    fn cond_exists(&mut self, c: &Expr, head: usize) {
+    fn cond_exists(&mut self, c: &Expr, head: usize, ctx: Ctx) {
         let mut operands = Vec::new();
         let mut ops = Vec::new();
         self.flatten_bool_pub(c, &mut operands, &mut ops);
-        // The chain keeps its source layout (spaced operators).
-        for x in operands {
-            self.exists_paren = Some(Ind::Col(head, 4));
-            self.expr(x);
-            self.exists_paren = None;
-        }
+        self.in_ctx(ctx, |b| {
+            for x in operands {
+                b.exists_paren = Some(Ind::Col(head, b.ind()));
+                b.expr(x);
+                b.exists_paren = None;
+            }
+        });
+        // The chain keeps its source layout (spaced operators), or is put on
+        // one line.
+        let keep = self.chain_style(ctx).keep;
         for op in ops {
             let anchor = self.l.gaps[op].anchor;
-            self.set(op, Rule::Keep(Ind::Src(anchor), Sp::One));
-            self.set(op + 1, Rule::Keep(Ind::Src(anchor), Sp::One));
+            let rule = if keep {
+                Rule::Keep(Ind::Src(anchor), Sp::One)
+            } else {
+                Rule::Flat(Sp::One)
+            };
+            self.set(op, rule);
+            self.set(op + 1, rule);
         }
     }
 
@@ -127,7 +151,7 @@ impl Builder<'_> {
             && let Some(cr) = self.rng(c)
         {
             self.set(cr.0, Rule::Flat(Sp::One));
-            self.cond_exists(c, if_tok);
+            self.cond_exists(c, if_tok, Ctx::If);
         }
         self.cond_body(if_tok, &s.if_block.conditional_statements);
         for b in &s.elseif_blocks {
@@ -162,7 +186,7 @@ impl Builder<'_> {
             && let Some(cr) = self.rng(c)
         {
             self.set(cr.0, Rule::Flat(Sp::One));
-            self.cond_exists(c, w);
+            self.cond_exists(c, w, Ctx::While);
         }
         self.cond_body(w, &b.conditional_statements);
     }
@@ -270,7 +294,9 @@ impl Builder<'_> {
             }
             items.push((name, end));
             // Type right after the name, aligned.
-            self.align(name + 1, a, name);
+            if self.cfg.routine_params.align_types {
+                self.align(name + 1, a, name);
+            }
             self.set(name + 1, Rule::Flat(Sp::One));
             if let Some(d) = default {
                 self.expr(d);
@@ -290,17 +316,26 @@ impl Builder<'_> {
         let open = first.0 - 1;
         if self.is(open, &Token::LParen) && self.is(last + 1, &Token::RParen) {
             self.set(open, Rule::Break(Ind::Col(create, 0)));
-            self.set(first.0, Rule::Break(Ind::Col(create, 2)));
-            for w in items.windows(2) {
-                self.set(w[0].1 + 1, Rule::Break(Ind::Col(create, 0)));
-                self.set(w[1].0, Rule::Flat(Sp::One));
-            }
+            self.param_lines(create, &items);
             self.set(last + 1, Rule::Break(Ind::Col(create, 0)));
         } else {
-            self.set(first.0, Rule::Break(Ind::Col(create, 2)));
-            for w in items.windows(2) {
+            self.param_lines(create, &items);
+        }
+    }
+
+    /// One parameter per line 2 in from `create`, with leading commas at
+    /// the `create` column or trailing commas.
+    fn param_lines(&mut self, create: usize, items: &[R]) {
+        let Some(first) = items.first() else { return };
+        self.set(first.0, Rule::Break(Ind::Col(create, 2)));
+        let leading = self.cfg.routine_params.comma == Comma::Leading;
+        for w in items.windows(2) {
+            if leading {
                 self.set(w[0].1 + 1, Rule::Break(Ind::Col(create, 0)));
                 self.set(w[1].0, Rule::Flat(Sp::One));
+            } else {
+                self.set(w[0].1 + 1, Rule::Flat(Sp::No));
+                self.set(w[1].0, Rule::Break(Ind::Col(create, 2)));
             }
         }
     }
@@ -377,10 +412,43 @@ impl Builder<'_> {
         }
     }
 
+    /// `exec name a, b, c`: the arguments laid out by `exec_args` (by
+    /// default as written).
+    fn exec_args(&mut self, name: &ObjectName, n: usize, r: R) {
+        let st = self.cfg.exec_args.style();
+        if st == crate::config::KeptList::default().style() {
+            return;
+        }
+        let Some(nr) = self.rng(name) else { return };
+        let end = if self.is(r.1, &Token::SemiColon) {
+            r.1 - 1
+        } else {
+            r.1
+        };
+        let items = self.split_commas(nr.1, end + 1);
+        if items.len() == n && items[0].0 == nr.1 + 1 {
+            self.bare_list(&items, st, Ind::Col(items[0].0, -2), r.0);
+        }
+    }
+
     fn create_view(&mut self, v: &CreateView, r: R) {
+        // `(a, b, c)` after the name.
+        let st = self.cfg.view_columns.style();
+        if !v.columns.is_empty()
+            && st != crate::config::KeptList::default().style()
+            && let Some(nr) = self.rng(&v.name)
+            && self.is(nr.1 + 1, &Token::LParen)
+            && let Some(close) = self.close_paren(nr.1 + 1)
+        {
+            let open = nr.1 + 1;
+            let items = self.split_commas(open, close);
+            if items.len() == v.columns.len() {
+                self.paren_list(open, &items, close, st, r.0);
+            }
+        }
         // The query one indent in (on a new line).
         if let Some(qr) = self.rng(v.query.as_ref()) {
-            self.set(qr.0, Rule::Break(Ind::Col(r.0, 4)));
+            self.set(qr.0, Rule::Break(Ind::Col(r.0, self.ind())));
         }
         self.query(&v.query);
     }
@@ -391,17 +459,17 @@ impl Builder<'_> {
         if let Some(tr) = self.rng(&t.table_name)
             && self.is_kw(tr.0 - 1, "on")
         {
-            self.set(tr.0 - 1, Rule::Break(Ind::Col(create, 4)));
+            self.set(tr.0 - 1, Rule::Break(Ind::Col(create, self.ind())));
             let k = tr.1 + 1;
             if ["after", "for", "instead"].iter().any(|w| self.is_kw(k, w)) {
-                self.set(k, Rule::Break(Ind::Col(create, 4)));
+                self.set(k, Rule::Break(Ind::Col(create, self.ind())));
             }
         }
         if let Some(ConditionalStatements::BeginEnd(bes)) = &t.statements
             && let Some(begin) = self.att(&bes.begin_token)
             && self.is_kw(begin - 1, "as")
         {
-            self.set(begin - 1, Rule::Break(Ind::Col(create, 4)));
+            self.set(begin - 1, Rule::Break(Ind::Col(create, self.ind())));
         }
         match &t.statements {
             Some(cs) => self.routine_body(create, cs, r),

@@ -1,0 +1,15 @@
+margin = 60
+
+[in_list]
+wrap = "never"
+keep_line_breaks = false
+
+[function_args]
+wrap = "chop_if_long"
+
+[exec_args]
+wrap = "chop_if_long"
+comma = "trailing"
+
+[order_by]
+wrap = "always"

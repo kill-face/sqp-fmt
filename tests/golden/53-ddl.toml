@@ -1,0 +1,21 @@
+[create_table]
+comma = "leading"
+align_columns = false
+named_constraint_on_new_line = false
+
+[foreign_key]
+references_on_new_line = false
+
+[routine_params]
+comma = "trailing"
+align_types = false
+
+[index_columns]
+wrap = "always"
+
+[view_columns]
+wrap = "chop_if_long"
+comma = "trailing"
+
+[alter_table]
+wrap = "always"

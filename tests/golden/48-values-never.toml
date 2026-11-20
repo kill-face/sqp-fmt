@@ -1,0 +1,10 @@
+[values]
+wrap = "never"
+keep_line_breaks = false
+
+[values.row]
+wrap = "always"
+comma = "trailing"
+
+[insert_columns]
+wrap = "chop_if_long"

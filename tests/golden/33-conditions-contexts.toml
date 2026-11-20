@@ -1,0 +1,51 @@
+[join_on]
+wrap = "always"
+
+[join_on.groups]
+wrap = "never"
+
+[case_when]
+keep_line_breaks = false
+
+[case_when.groups]
+wrap = "always"
+
+[if_condition]
+keep_line_breaks = false
+
+[if_condition.groups]
+wrap = "always"
+
+[while_condition.groups]
+wrap = "always"
+
+[merge_on]
+keep_line_breaks = false
+
+[merge_on.groups]
+wrap = "always"
+
+[merge_when_condition]
+keep_line_breaks = false
+
+[merge_when_condition.groups]
+wrap = "never"
+keep_line_breaks = false
+
+[check_constraint]
+keep_line_breaks = false
+
+[check_constraint.groups]
+wrap = "always"
+
+[other_conditions]
+keep_line_breaks = false
+
+[other_conditions.groups]
+wrap = "always"
+
+[having.groups]
+wrap = "always"
+
+[while_condition]
+keep_line_breaks = false

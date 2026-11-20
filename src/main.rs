@@ -13,8 +13,9 @@ mod corpus;
 
 pub(crate) fn usage() -> ExitCode {
     eprintln!(
-        "usage: tsqlfmt [FILE]                      format FILE (or stdin) to stdout\n       \
-         tsqlfmt corpus [--diff FILE] [--top N] <path>...\n       \
+        "usage: tsqlfmt [--config FILE] [--stdin-filepath PATH] [FILE | -]\n         \
+         format FILE (or stdin) to stdout, with FILE's (PATH's) tsqlfmt.toml\n       \
+         tsqlfmt corpus [--config FILE] [--diff FILE] [--top N] <path>...\n       \
          tsqlfmt check [--files] <path>...\n       \
          tsqlfmt spans [--details] <path>..."
     );
@@ -199,15 +200,67 @@ fn spans(args: &[String]) -> ExitCode {
     }
 }
 
-/// `tsqlfmt [FILE]`: format FILE (or stdin) to stdout. Batches that can't
-/// be formatted safely come out exactly as written.
-fn format_cmd(path: Option<&str>) -> ExitCode {
+/// `tsqlfmt [--config FILE] [--stdin-filepath PATH] [FILE | -]`: format
+/// FILE (or stdin) to stdout. Batches that can't be formatted safely come
+/// out exactly as written.
+///
+/// The configuration is `--config FILE`, else the first `tsqlfmt.toml` in
+/// the formatted file's directory or one above it (for stdin: from
+/// `--stdin-filepath`'s directory, else the current directory), else the
+/// defaults. A bad configuration is an error: nothing is written to stdout.
+fn format_cmd(args: &[String]) -> ExitCode {
     use std::io::{Read, Write};
+    let mut config: Option<PathBuf> = None;
+    let mut stdin_path: Option<PathBuf> = None;
+    let mut file: Option<PathBuf> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let (flag, inline) = match a.split_once('=') {
+            Some((f, v)) if f.starts_with("--") => (f, Some(v.to_string())),
+            _ => (a.as_str(), None),
+        };
+        let mut value = || inline.clone().or_else(|| it.next().cloned());
+        match flag {
+            "--config" => match value() {
+                Some(v) => config = Some(PathBuf::from(v)),
+                None => return usage(),
+            },
+            "--stdin-filepath" => match value() {
+                Some(v) => stdin_path = Some(PathBuf::from(v)),
+                None => return usage(),
+            },
+            "-" if file.is_none() => {}
+            f if !f.starts_with('-') && file.is_none() => file = Some(PathBuf::from(a)),
+            _ => return usage(),
+        }
+    }
+    if file.is_some() && stdin_path.is_some() {
+        eprintln!("tsqlfmt: --stdin-filepath only applies when reading stdin");
+        return ExitCode::from(2);
+    }
+    let cfg = match &config {
+        Some(c) => tsqlfmt::Config::load(c),
+        None => {
+            let named = file.as_deref().or(stdin_path.as_deref());
+            let dir = named
+                .and_then(Path::parent)
+                .map(Path::to_path_buf)
+                .unwrap_or_default();
+            tsqlfmt::Config::discover(&dir).map(|(c, _)| c)
+        }
+    };
+    let cfg = match cfg {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("tsqlfmt: {e}");
+            return ExitCode::from(2);
+        }
+    };
     // A panic is caught per batch and that batch left as written; keep the
     // panic message off stderr, which editors show to the user.
     std::panic::set_hook(Box::new(|_| {}));
     let mut src = String::new();
-    let read = match path {
+    let read = match &file {
         Some(p) => std::fs::read_to_string(p).map(|s| src = s),
         None => std::io::stdin().read_to_string(&mut src).map(|_| ()),
     };
@@ -215,7 +268,7 @@ fn format_cmd(path: Option<&str>) -> ExitCode {
         eprintln!("tsqlfmt: {e}");
         return ExitCode::FAILURE;
     }
-    let (out, _) = tsqlfmt::format(&src);
+    let (out, _) = tsqlfmt::format_with(&src, &cfg);
     let mut stdout = std::io::stdout().lock();
     if stdout
         .write_all(out.as_bytes())
@@ -234,8 +287,6 @@ fn main() -> ExitCode {
         Some("spans") => spans(&args[1..]),
         Some("corpus") => corpus::run(&args[1..]),
         Some("-h" | "--help" | "help") => usage(),
-        Some(p) if !p.starts_with('-') => format_cmd(Some(p)),
-        Some("-") | None => format_cmd(None),
-        _ => usage(),
+        _ => format_cmd(&args),
     }
 }
