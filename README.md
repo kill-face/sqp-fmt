@@ -46,14 +46,31 @@ style of [STYLE.md](STYLE.md). [docs/config.md](docs/config.md) has every
 key. A bad configuration is an error (exit code 2, the message on stderr
 points at the key, nothing on stdout).
 
+Files in place, for scripts, CI and agents:
+
+```sh
+sqp-fmt --write PATH...   # format files in place; directories: their .sql files
+sqp-fmt --check PATH...   # change nothing; exit 1 if any file would change
+```
+
+Both print the files that changed (or would change) on stdout, one per
+line, and on stderr a summary plus the files whose batches were left as
+written because they don't parse. Each file gets its own `sqp-fmt.toml` and
+dialect. Exit codes: 0 done (`--check`: nothing to change), 1 `--check`
+found files to change, 2 a file couldn't be found, read, written or
+configured. A batch that doesn't parse is not an error: it's left as written.
+`--write` replaces a file atomically (a temporary file renamed over it),
+keeps its permissions, follows symlinks, and leaves unchanged files
+untouched.
+
 For conform.nvim, pass the buffer's path so the right `sqp-fmt.toml` is
 found:
 
 ```lua
 require("conform").setup({
-  formatters_by_ft = { sql = { "sqp-fmt" } },
+  formatters_by_ft = { sql = { "sqp_fmt" } },
   formatters = {
-    sqp-fmt = {
+    sqp_fmt = {
       command = "sqp-fmt",
       args = { "--stdin-filepath", "$FILENAME" },
       stdin = true,
@@ -136,6 +153,7 @@ last column leaves it out.
 | 2026-11-19 | 443 / 510 | 52292 / 65365 (80.00%) | 0 | 0 | 52253 / 52653 (99.24%) | Statement families: select / from / join / where, CTEs, subqueries, insert / values / update / delete / merge, case, create table / index / alter table, procedures / functions / views / triggers, declare / set, if / while / try blocks (STYLE.md rules R1-R24, R27) |
 | 2026-11-19 | 417 / 510 | 51995 / 65365 (79.55%) | 0 | 0 | 51956 / 52653 (98.68%) | STYLE.md changes 1 and 2 (boolean blocks, window blocks; R25, R26). The changed lines left: the two changes (~320 lines), blank-line runs collapsed (~100), corpus inconsistencies where the majority rule wins (inline named constraints, trailing-comma lists, misaligned columns, `merge … on` indented), and the generated seed file |
 | 2026-11-19 | 417 / 510 | 51995 / 65365 (79.55%) | 0 | 0 | 51956 / 52653 (98.68%) | Configuration file (`sqp-fmt.toml`, docs/config.md); no file = the same output as before, byte for byte. A window or group written over several lines now breaks the list or `case` around it (none in the test bed) |
+| 2026-11-20 | 416 / 510 | 51503 / 65365 (78.79%) | 0 | 0 | 51464 / 52653 (97.74%) | A CTE's `(` 4 in from `with` also when there's one CTE (was: from its name, as DataGrip does); `where.indent` / `having.indent` and `join_on.indent`. The ~490 lines more that change are single-CTE queries moving left |
 
 ## Decisions
 

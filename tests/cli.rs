@@ -51,6 +51,9 @@ fn run_xdg(args: &[&str], cwd: &Path, stdin: Option<&str>, xdg: &Path) -> Output
         .args(args)
         .current_dir(cwd)
         .env("XDG_CONFIG_HOME", xdg)
+        // Trees are made in the temp directory: don't find whatever
+        // sqp-fmt.toml happens to be there or above it.
+        .env("SQP_FMT_CEILING_DIRECTORIES", std::env::temp_dir())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -339,4 +342,129 @@ fn bad_dialect_section_points_at_the_key() {
         err.contains("sqp-fmt.toml:3:11: unknown dialect \"tsql\""),
         "{err}"
     );
+}
+
+#[test]
+fn write_formats_files_in_place_with_their_own_config() {
+    let t = tree_with_config("write_formats_files_in_place");
+    t.file("proj/sub/done.sql", BLOCK);
+    let out = run(&["--write", "proj", "other/q.sql"], &t.0, None);
+    // Only the changed files are listed, each with its own configuration.
+    let listed = stdout(&out);
+    let mut listed: Vec<&str> = listed.lines().collect();
+    listed.sort();
+    assert_eq!(listed, ["other/q.sql", "proj/sub/deeper/q.sql"]);
+    let read = |p: &str| std::fs::read_to_string(t.0.join(p)).unwrap();
+    assert_eq!(read("proj/sub/deeper/q.sql"), BLOCK);
+    assert_eq!(read("other/q.sql"), DEFAULT);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("2 files formatted, 1 unchanged"), "{err}");
+    // No temporary files are left behind, and a second run changes nothing.
+    assert!(
+        !std::fs::read_dir(t.0.join("other")).unwrap().any(|e| e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".tmp"))
+    );
+    let again = run(&["--write", "proj", "other"], &t.0, None);
+    assert_eq!(stdout(&again), "");
+}
+
+#[cfg(unix)]
+#[test]
+fn write_keeps_permissions_and_symlinks() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tree::new("write_keeps_permissions_and_symlinks");
+    let real = t.file("real.sql", SQL);
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o640)).unwrap();
+    std::os::unix::fs::symlink("real.sql", t.0.join("link.sql")).unwrap();
+    let out = run(&["--write", "link.sql"], &t.0, None);
+    assert_eq!(stdout(&out), "link.sql\n");
+    assert!(
+        std::fs::symlink_metadata(t.0.join("link.sql"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(std::fs::read_to_string(&real).unwrap(), DEFAULT);
+    let mode = std::fs::metadata(&real).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o640);
+}
+
+#[test]
+fn check_reports_without_writing() {
+    let t = tree_with_config("check_reports_without_writing");
+    let out = run(&["--check", "proj"], &t.0, None);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "proj/sub/deeper/q.sql\n"
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("1 file would be formatted"));
+    assert_eq!(
+        std::fs::read_to_string(t.0.join("proj/sub/deeper/q.sql")).unwrap(),
+        SQL
+    );
+    run(&["--write", "proj"], &t.0, None);
+    let clean = run(&["--check", "proj"], &t.0, None);
+    assert_eq!(clean.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&clean.stdout), "");
+}
+
+#[test]
+fn write_and_check_errors() {
+    let t = Tree::new("write_and_check_errors");
+    t.file("q.sql", SQL);
+    // A missing path is an error (2), but the other files are still done.
+    let out = run(&["--write", "missing.sql", "q.sql"], &t.0, None);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("missing.sql: no such file"));
+    assert_eq!(std::fs::read_to_string(t.0.join("q.sql")).unwrap(), DEFAULT);
+    // No paths, stdin, or both flags: usage errors.
+    for args in [
+        &["--write"][..],
+        &["--check", "-"],
+        &["--write", "--check", "q.sql"],
+        &["--write", "--stdin-filepath", "q.sql", "q.sql"],
+    ] {
+        assert_eq!(
+            run(args, &t.0, Some(SQL)).status.code(),
+            Some(2),
+            "{args:?}"
+        );
+    }
+    // Several files to stdout need --write or --check.
+    t.file("r.sql", SQL);
+    assert_eq!(run(&["q.sql", "r.sql"], &t.0, None).status.code(), Some(2));
+}
+
+#[test]
+fn unparsed_batches_are_reported_not_errors() {
+    let t = Tree::new("unparsed_batches_are_reported_not_errors");
+    t.file("q.sql", "select a from t where\n");
+    let out = run(&["--check", "q.sql"], &t.0, None);
+    assert_eq!(out.status.code(), Some(0));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("q.sql: 1 of 1 batches left as written"),
+        "{err}"
+    );
+}
+
+#[test]
+fn ceiling_directories_stop_the_search() {
+    let t = tree_with_config("ceiling_directories_stop_the_search");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sqp-fmt"))
+        .arg("proj/sub/deeper/q.sql")
+        .current_dir(&t.0)
+        .env("XDG_CONFIG_HOME", t.0.join("no-user-config"))
+        .env("SQP_FMT_CEILING_DIRECTORIES", t.0.join("proj/sub"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take();
+    // proj/sqp-fmt.toml is above the ceiling proj/sub: the defaults apply.
+    assert_eq!(stdout(&child.wait_with_output().unwrap()), DEFAULT);
 }

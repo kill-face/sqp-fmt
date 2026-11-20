@@ -1,9 +1,9 @@
 with recent as
-         (
-             select CustomerId, max(CreatedAt) as LastOrder
-             from dbo.Orders
-             group by CustomerId
-         )
+    (
+        select CustomerId, max(CreatedAt) as LastOrder
+        from dbo.Orders
+        group by CustomerId
+    )
 select *
 from recent
 ;with a as

@@ -15,6 +15,10 @@ pub(crate) fn usage() -> ExitCode {
     eprintln!(
         "usage: sqp-fmt [--config FILE] [--dialect NAME] [--stdin-filepath PATH] [FILE | -]\n         \
          format FILE (or stdin) to stdout, with FILE's (PATH's) sqp-fmt.toml\n       \
+         sqp-fmt --write [--config FILE] [--dialect NAME] <path>...\n         \
+         format files in place (directories: their .sql files); prints the files changed\n       \
+         sqp-fmt --check [--config FILE] [--dialect NAME] <path>...\n         \
+         print the files formatting would change; exit 1 if any, 2 on errors\n       \
          sqp-fmt corpus [--config FILE] [--dialect NAME] [--diff FILE] [--top N] <path>...\n       \
          sqp-fmt corpus --sqlfluff [--config FILE] <dir>\n       \
          sqp-fmt check [--dialect NAME] [--files] <path>...\n       \
@@ -217,7 +221,9 @@ fn format_cmd(args: &[String]) -> ExitCode {
     let mut config: Option<PathBuf> = None;
     let mut dialect: Option<String> = None;
     let mut stdin_path: Option<PathBuf> = None;
-    let mut file: Option<PathBuf> = None;
+    let mut mode = Mode::Stdout;
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut stdin_dash = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let (flag, inline) = match a.split_once('=') {
@@ -238,38 +244,40 @@ fn format_cmd(args: &[String]) -> ExitCode {
                 Some(v) => stdin_path = Some(PathBuf::from(v)),
                 None => return usage(),
             },
-            "-" if file.is_none() => {}
-            f if !f.starts_with('-') && file.is_none() => file = Some(PathBuf::from(a)),
+            "--write" | "--check" if mode == Mode::Stdout && inline.is_none() => {
+                mode = if flag == "--write" {
+                    Mode::Write
+                } else {
+                    Mode::Check
+                };
+            }
+            "-" => stdin_dash = true,
+            f if !f.starts_with('-') => paths.push(PathBuf::from(a)),
             _ => return usage(),
         }
     }
+    if mode != Mode::Stdout {
+        if paths.is_empty() || stdin_dash || stdin_path.is_some() {
+            eprintln!(
+                "sqp-fmt: --write and --check take files or directories (not stdin), and only one of them"
+            );
+            return ExitCode::from(2);
+        }
+        return format_files(&paths, mode, config.as_deref(), dialect.as_deref());
+    }
+    if paths.len() + usize::from(stdin_dash) > 1 {
+        eprintln!("sqp-fmt: formats one file to stdout; use --write or --check for several");
+        return ExitCode::from(2);
+    }
+    let file = paths.pop();
     if file.is_some() && stdin_path.is_some() {
         eprintln!("sqp-fmt: --stdin-filepath only applies when reading stdin");
         return ExitCode::from(2);
     }
     let named = file.as_deref().or(stdin_path.as_deref());
-    let cfg = match &config {
-        Some(c) => sqp_fmt::Config::load(c),
-        None => {
-            let dir = named
-                .and_then(Path::parent)
-                .map(Path::to_path_buf)
-                .unwrap_or_default();
-            let user = sqp_fmt::config::user_config();
-            sqp_fmt::Config::discover(&dir, user.as_deref()).map(|(c, _)| c)
-        }
-    };
-    let cfg = match cfg {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("sqp-fmt: {e}");
-            return ExitCode::from(2);
-        }
-    };
-    let Some(dialect) = resolve_dialect(dialect.as_deref(), &cfg, named) else {
+    let Ok(cfg) = file_config(config.as_deref(), dialect.as_deref(), named) else {
         return ExitCode::from(2);
     };
-    let cfg = cfg.for_dialect(dialect);
     // A panic is caught per batch and that batch left as written; keep the
     // panic message off stderr, which editors show to the user.
     std::panic::set_hook(Box::new(|_| {}));
@@ -292,6 +300,152 @@ fn format_cmd(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Format one file (or stdin) to stdout.
+    Stdout,
+    /// `--write`: format files in place.
+    Write,
+    /// `--check`: report the files formatting would change.
+    Check,
+}
+
+/// The configuration for a file (or for stdin named by `--stdin-filepath`):
+/// `--config`, else found from the file's directory, then specialised for
+/// its dialect. Errors are printed.
+fn file_config(
+    config: Option<&Path>,
+    dialect: Option<&str>,
+    named: Option<&Path>,
+) -> Result<sqp_fmt::Config, ()> {
+    let cfg = match config {
+        Some(c) => sqp_fmt::Config::load(c),
+        None => {
+            let dir = named
+                .and_then(Path::parent)
+                .map(Path::to_path_buf)
+                .unwrap_or_default();
+            let user = sqp_fmt::config::user_config();
+            sqp_fmt::Config::discover(&dir, user.as_deref()).map(|(c, _)| c)
+        }
+    };
+    let cfg = cfg.map_err(|e| eprintln!("sqp-fmt: {e}"))?;
+    let dialect = resolve_dialect(dialect, &cfg, named).ok_or(())?;
+    Ok(cfg.for_dialect(dialect))
+}
+
+/// `--write` / `--check` over files and directories. Directories are
+/// searched for `.sql` files as `corpus` does; a file named explicitly is
+/// formatted whatever its extension. Each file gets its own configuration
+/// and dialect, found as for a single file.
+///
+/// Prints the files that changed (`--write`) or would change (`--check`) on
+/// stdout, one per line; on stderr, a summary and the files with batches
+/// left as written. Exit status: 2 if a file couldn't be found, read,
+/// written or configured; else, for `--check`, 1 if any file would change;
+/// else 0. Batches that don't parse are left as written and aren't errors.
+fn format_files(
+    args: &[PathBuf],
+    mode: Mode,
+    config: Option<&Path>,
+    dialect: Option<&str>,
+) -> ExitCode {
+    // As for one file: a panic leaves its batch as written, silently.
+    std::panic::set_hook(Box::new(|_| {}));
+    let mut files = Vec::new();
+    let mut failed = 0;
+    for a in args {
+        if a.is_dir() {
+            collect(a, &mut files);
+        } else if a.exists() {
+            files.push(a.clone());
+        } else {
+            eprintln!("sqp-fmt: {}: no such file or directory", a.display());
+            failed += 1;
+        }
+    }
+    let (mut changed, mut unchanged) = (0, 0);
+    for file in &files {
+        let Ok(cfg) = file_config(config, dialect, Some(file)) else {
+            failed += 1;
+            continue;
+        };
+        let src = match std::fs::read_to_string(file) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("sqp-fmt: {}: {e}", file.display());
+                failed += 1;
+                continue;
+            }
+        };
+        let (out, stats) = sqp_fmt::format_with(&src, &cfg);
+        let left = stats.unparsed + stats.mismatches + stats.errors;
+        if left > 0 {
+            eprintln!(
+                "sqp-fmt: {}: {left} of {} batches left as written (they don't parse, or formatting them wasn't safe)",
+                file.display(),
+                stats.batches
+            );
+        }
+        if out == src {
+            unchanged += 1;
+            continue;
+        }
+        if mode == Mode::Write
+            && let Err(e) = write_in_place(file, &out)
+        {
+            eprintln!("sqp-fmt: {}: {e}", file.display());
+            failed += 1;
+            continue;
+        }
+        changed += 1;
+        println!("{}", file.display());
+    }
+    let verb = if mode == Mode::Write {
+        "formatted"
+    } else {
+        "would be formatted"
+    };
+    let failures = if failed > 0 {
+        format!(", {failed} failed")
+    } else {
+        String::new()
+    };
+    eprintln!(
+        "sqp-fmt: {changed} file{} {verb}, {unchanged} unchanged{failures}",
+        if changed == 1 { "" } else { "s" }
+    );
+    if failed > 0 {
+        ExitCode::from(2)
+    } else if mode == Mode::Check && changed > 0 {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// Replaces `path`'s contents with `text` atomically: a temporary file in
+/// the same directory, given the original's permissions, renamed over it. A
+/// symlink is followed, so it stays a symlink.
+fn write_in_place(path: &Path, text: &str) -> std::io::Result<()> {
+    let target = std::fs::canonicalize(path)?;
+    let dir = target.parent().unwrap_or(Path::new("."));
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = dir.join(format!(".{name}.sqp-fmt-{}.tmp", std::process::id()));
+    let result = std::fs::metadata(&target).and_then(|meta| {
+        std::fs::write(&tmp, text)?;
+        std::fs::set_permissions(&tmp, meta.permissions())?;
+        std::fs::rename(&tmp, &target)
+    });
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// The dialect for a file: `flag` (`--dialect`), else the configuration's

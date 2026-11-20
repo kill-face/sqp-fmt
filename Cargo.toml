@@ -7,8 +7,8 @@ license = "MIT"
 
 [dependencies]
 # sqp-rs: fork of apache/datafusion-sqlparser-rs with grammar and span fixes.
-# Path dependency while both are developed side by side; switch to the git
-# fork (kill-face/sqp-rs, branch main) for Nix builds.
+# Path dependency, so both can be developed side by side; the Nix package
+# (flake.nix) puts the kill-face/sqp-rs main branch there.
 sqlparser = { path = "../sqp-rs", features = ["visitor"] }
 # The configuration file (sqp-fmt.toml).
 serde = { version = "1.0.229", features = ["derive"] }

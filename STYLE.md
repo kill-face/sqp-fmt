@@ -19,7 +19,7 @@ no `;` added, comments kept where they are.
 - Clauses (`from`, `join`, `where`, `group by`, `having`, `order by`) start a
   line; a short clause body stays on the clause's line
   (`select a, b, c`, `group by o.Id, c.[Name]`).
-- `join` at the clause level, its `on` on the next line indented 4.
+- `join` at the clause level, its `on` on the next line one indent in (`join_on.indent`).
 - `where` predicates: one per line, `and` / `or` indented 2 under `where`.
 - Leading commas when a list is chopped (`set`, `values`, procedure
   parameters, long select lists).
@@ -235,7 +235,7 @@ select distinct top 10 a.Id
 
 Each clause keyword (`from`, `where`, `group by`, `having`, `order by`,
 `into`, `option`) starts a line at the `select` column; each join too, with
-its `on` on the next line 4 in. `and` / `or` in an `on` condition keep the
+its `on` on the next line one indent in (`join_on.indent`). `and` / `or` in an `on` condition keep the
 author's line breaks, starting the line under `on` (test bed: 28 of 28). A
 derived table after `join` / `apply` has its `(` on its own line under the
 join (19 of 23).
@@ -254,7 +254,7 @@ outer apply
 
 ### R10 where / having (`10-where`)
 
-One predicate per line: `and` 2 in from `where`, `or` 3 in so the
+One predicate per line: `and` 2 in from `where` (`where.indent`), `or` 3 in so the
 predicates line up (test bed: `and` +2 205 times, `or` +3 6 of 6).
 
 ```sql
@@ -287,9 +287,10 @@ where not exists
 
 `with A as`, then `(` on its own line, the query 4 in from `(`, `)` under
 `(`; later CTEs start `   , B as` so the names line up; the main query at
-the `with` column. The `(` is 4 in from `with` when there are several CTEs
-and 4 in from the CTE's name when there's one (test bed: 15 of 15 and 31 of
-33 — DataGrip does this).
+the `with` column. The `(` is 4 in from `with`, however many CTEs there are.
+(DataGrip, and most of the test bed, put a single CTE's `(` 4 in from its
+name instead; that indents the whole query by the name's length, so it was
+dropped.) `cte.lparen_on_new_line = false` puts `(` on the `as` line.
 
 ### R14 Set operations (`14-union`)
 
@@ -431,8 +432,8 @@ baseline text) disagree, or the test bed doesn't settle it; the rule above
 is what's implemented.
 
 - `or` under `where` is 3 in (test bed), not 2 (baseline text above).
-- A CTE's `(` depends on how many CTEs there are (DataGrip's output, followed
-  by the test bed); the reference output puts `(` on the `as` line instead.
+- A CTE's `(` used to depend on how many CTEs there are (DataGrip's output,
+  followed by the test bed); since 2026-11-20 it's always 4 in from `with` (R13).
 - A select's first item after a comment goes 4 in from `select`, left of the
   other items (test bed, 4 of 4).
 - "A long `over (…)`" is read as "doesn't fit, or written over several

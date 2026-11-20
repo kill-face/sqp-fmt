@@ -99,13 +99,9 @@ impl Builder<'_> {
                     self.set(name, Rule::Break(Ind::Col(first_name, 0)));
                 }
             }
-            // `as (` : `(` on its own line, 4 in from `with` when there are
-            // several CTEs, 4 in from the CTE's name when there's one.
-            let paren = if w.cte_tables.len() == 1 {
-                Ind::Col(name, self.ind())
-            } else {
-                Ind::LineOf(with_tok, self.ind())
-            };
+            // `as (` : `(` on its own line, one indent in from `with`'s line
+            // (however many CTEs there are).
+            let paren = Ind::LineOf(with_tok, self.ind());
             let own_line = self.cfg.cte.lparen_on_new_line;
             if own_line {
                 self.set(open, Rule::Break(paren));
@@ -315,7 +311,7 @@ impl Builder<'_> {
                 let wt = wr.0 - 1;
                 self.set(wt, Rule::Break(clause));
                 self.set(wr.0, Rule::Flat(Sp::One));
-                self.condition(w, wt, 2, Ctx::Where);
+                self.condition(w, wt, self.cfg.where_.indent as isize, Ctx::Where);
             } else {
                 self.in_ctx(Ctx::Where, |b| b.expr(w));
             }
@@ -349,7 +345,7 @@ impl Builder<'_> {
                 let ht = hr.0 - 1;
                 self.set(ht, Rule::Break(clause));
                 self.set(hr.0, Rule::Flat(Sp::One));
-                self.condition(h, ht, 2, Ctx::Having);
+                self.condition(h, ht, self.cfg.having.indent as isize, Ctx::Having);
             } else {
                 self.in_ctx(Ctx::Having, |b| b.expr(h));
             }
@@ -456,7 +452,13 @@ impl Builder<'_> {
                     && self.is_kw(er.0 - 1, "on")
                 {
                     let on = er.0 - 1;
-                    self.set(on, Rule::Break(Ind::Col(jr.0, self.ind())));
+                    self.set(
+                        on,
+                        Rule::Break(Ind::Col(
+                            jr.0,
+                            self.cfg.join_on.indent.map_or(self.ind(), |i| i as isize),
+                        )),
+                    );
                     self.set(er.0, Rule::Flat(Sp::One));
                     self.condition_keep(e, on);
                     continue;

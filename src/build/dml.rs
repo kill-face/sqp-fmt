@@ -108,7 +108,7 @@ impl Builder<'_> {
                 let wt = wr.0 - 1;
                 self.set(wt, Rule::Break(clause));
                 self.set(wr.0, Rule::Flat(Sp::One));
-                self.condition(w, wt, 2, Ctx::Where);
+                self.condition(w, wt, self.cfg.where_.indent as isize, Ctx::Where);
                 return;
             }
             self.in_ctx(Ctx::Where, |b| b.expr(w));

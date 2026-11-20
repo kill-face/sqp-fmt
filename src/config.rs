@@ -147,7 +147,7 @@ section! {
         /// The `having` condition (R10).
         having: ClauseCondition = ClauseCondition::default(),
         /// The `on` condition of a join (R9).
-        join_on: Condition = Condition::default(),
+        join_on: JoinCondition = JoinCondition::default(),
         /// The condition of a `case` expression's `when`.
         case_when: Condition = Condition::default(),
         /// The condition of an `if`.
@@ -287,6 +287,26 @@ section! {
         wrap: Wrap = Wrap::Always,
         /// Keep the author's line breaks before `and` / `or`.
         keep_line_breaks: bool = true,
+        /// Columns from the clause keyword to a broken `and` (`or` one
+        /// more, so the predicates line up when this is 2): 0 to 16.
+        indent: usize = 2,
+        /// Parenthesised `and` / `or` groups (logical blocks, R25).
+        groups: Groups = Groups::default(),
+    }
+}
+
+section! {
+    /// A join's `on` condition: its top-level `and` / `or` chain, the
+    /// parenthesised groups inside it, and where `on` goes.
+    JoinCondition {
+        /// How the top-level `and` / `or` chain wraps.
+        wrap: Wrap = Wrap::Never,
+        /// Keep the author's line breaks around `and` / `or`.
+        keep_line_breaks: bool = true,
+        /// Columns from `join` to `on`, which starts the line after the
+        /// joined table; a broken `and` / `or` starts under `on`: 0 to 16.
+        /// Unset: one indent level (`indent`).
+        indent: Option<usize> = None,
         /// Parenthesised `and` / `or` groups (logical blocks, R25).
         groups: Groups = Groups::default(),
     }
@@ -540,6 +560,15 @@ impl ClauseCondition {
 }
 
 impl Condition {
+    pub fn style(&self) -> WrapStyle {
+        WrapStyle {
+            wrap: self.wrap,
+            keep: self.keep_line_breaks,
+        }
+    }
+}
+
+impl JoinCondition {
     pub fn style(&self) -> WrapStyle {
         WrapStyle {
             wrap: self.wrap,
@@ -859,8 +888,15 @@ impl Config {
                 BOOLS,
             );
             v.groups(&format!("{key}.groups"), &c.groups);
+            v.indent(&format!("{key}.indent"), c.indent);
         }
-        v.condition("join_on", &self.join_on, ALL);
+        let j = &self.join_on;
+        v.wrap("join_on.wrap", j.wrap, ALL);
+        v.flag("join_on.keep_line_breaks", j.keep_line_breaks, BOOLS);
+        v.groups("join_on.groups", &j.groups);
+        if let Some(i) = j.indent {
+            v.indent("join_on.indent", i);
+        }
         for (key, c) in [
             ("case_when", &self.case_when),
             ("if_condition", &self.if_condition),
@@ -1016,6 +1052,12 @@ impl Validator {
         );
     }
 
+    fn indent(&mut self, key: &str, v: usize) {
+        if v > 16 {
+            self.problem(key, format!("{key} {v} is out of range (0 to 16)"));
+        }
+    }
+
     fn condition(&mut self, key: &str, c: &Condition, chain: &[Wrap]) {
         self.wrap(&format!("{key}.wrap"), c.wrap, chain);
         self.flag(
@@ -1082,6 +1124,11 @@ fn normalize(p: &Path) -> PathBuf {
 }
 
 /// The first `sqp-fmt.toml` in `dir` or a directory above it.
+///
+/// `SQP_FMT_CEILING_DIRECTORIES`, a `:`-separated list of absolute paths
+/// with the meaning of Git's `GIT_CEILING_DIRECTORIES`, stops the search
+/// from going up into a ceiling directory: neither it nor anything above it
+/// is searched (unless `dir` itself is one).
 pub fn find(dir: &Path) -> Option<PathBuf> {
     let dir = if dir.as_os_str().is_empty() {
         Path::new(".")
@@ -1089,9 +1136,23 @@ pub fn find(dir: &Path) -> Option<PathBuf> {
         dir
     };
     let abs = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
-    abs.ancestors()
-        .map(|d| d.join(FILE_NAME))
-        .find(|p| p.is_file())
+    let ceilings: Vec<PathBuf> = std::env::var_os("SQP_FMT_CEILING_DIRECTORIES")
+        .map(|v| {
+            std::env::split_paths(&v)
+                .filter(|p| p.is_absolute())
+                .collect()
+        })
+        .unwrap_or_default();
+    for d in abs.ancestors() {
+        if d != abs && ceilings.iter().any(|c| c == d) {
+            return None;
+        }
+        let p = d.join(FILE_NAME);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
 }
 
 /// An error in a configuration file.

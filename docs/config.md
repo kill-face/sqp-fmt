@@ -15,6 +15,10 @@ exactly as STYLE.md describes: every key's default is today's house style.
 - `--config FILE` uses FILE and skips the search.
 - The nearest file is the whole configuration: files further up are not
   merged in.
+- `SQP_FMT_CEILING_DIRECTORIES` (`:`-separated absolute paths, like Git's
+  `GIT_CEILING_DIRECTORIES`) stops the search from going up into those
+  directories: neither they nor anything above them is searched.
+- `--write` and `--check` search separately for each file they format.
 - `sqp-fmt corpus` uses `--config FILE` or the defaults; it doesn't search.
 
 A configuration error stops sqp-fmt before it writes anything (exit code 2)
@@ -108,6 +112,7 @@ comma = "leading"
 [where]
 wrap = "always"
 keep_line_breaks = true
+indent = 2                # `and` 2 in from `where` (`or` 3, so predicates line up)
 [where.groups]
 wrap = "chop_if_long"
 keep_line_breaks = true
@@ -115,19 +120,22 @@ keep_line_breaks = true
 [having]
 wrap = "always"
 keep_line_breaks = true
+indent = 2
 [having.groups]
 wrap = "chop_if_long"
 keep_line_breaks = true
 
-# The same keys, with the same defaults, for each of these conditions:
-# join_on, case_when, if_condition, while_condition, merge_on,
-# merge_when_condition, check_constraint, other_conditions.
 [join_on]
 wrap = "never"
 keep_line_breaks = true
+# indent = 4              # `on` this far in from `join`; unset: `indent`
 [join_on.groups]
 wrap = "chop_if_long"
 keep_line_breaks = true
+
+# The same keys as join_on (but no `indent`), with the same defaults, for
+# each of these conditions: case_when, if_condition, while_condition,
+# merge_on, merge_when_condition, check_constraint, other_conditions.
 
 [case_when]
 wrap = "never"
@@ -293,6 +301,8 @@ What each key accepts today. Any other value of a known key is rejected with
 | `group_by.*`, `order_by.*` (`wrap`, `keep_line_breaks`, `comma`) | ALL; `true`, `false`; `leading`, `trailing` | `never`, `true`, `leading` |
 | `where.wrap`, `having.wrap` | ALL | `always` |
 | `join_on.wrap` | ALL | `never` |
+| `where.indent`, `having.indent` | 0 to 16 (`and` this far in from the keyword, `or` one more) | 2 |
+| `join_on.indent` | 0 to 16 (`on` this far in from `join`; `and` / `or` under `on`) | unset: `indent` |
 | `case_when.wrap`, `if_condition.wrap`, `while_condition.wrap`, `merge_on.wrap`, `merge_when_condition.wrap`, `check_constraint.wrap`, `other_conditions.wrap` | `never` only (no broken layout for these chains yet) | `never` |
 | `<condition>.keep_line_breaks` (all ten conditions) | `true`, `false` | `true` |
 | `<condition>.groups.wrap` (all ten) | ALL | `chop_if_long` |
