@@ -20,10 +20,10 @@ where not exists (
     from u
     where u.Id = t.Id
 )
-  and exists (
-      select 1
-      from v
-  )
+    and exists (
+        select 1
+        from v
+    )
 if exists (
     select 1
     from t

@@ -311,7 +311,7 @@ impl Builder<'_> {
                 let wt = wr.0 - 1;
                 self.set(wt, Rule::Break(clause));
                 self.set(wr.0, Rule::Flat(Sp::One));
-                self.condition(w, wt, self.cfg.where_.indent as isize, Ctx::Where);
+                self.condition(w, wt, self.ind_or(self.cfg.where_.indent), Ctx::Where);
             } else {
                 self.in_ctx(Ctx::Where, |b| b.expr(w));
             }
@@ -345,7 +345,7 @@ impl Builder<'_> {
                 let ht = hr.0 - 1;
                 self.set(ht, Rule::Break(clause));
                 self.set(hr.0, Rule::Flat(Sp::One));
-                self.condition(h, ht, self.cfg.having.indent as isize, Ctx::Having);
+                self.condition(h, ht, self.ind_or(self.cfg.having.indent), Ctx::Having);
             } else {
                 self.in_ctx(Ctx::Having, |b| b.expr(h));
             }
@@ -454,10 +454,7 @@ impl Builder<'_> {
                     let on = er.0 - 1;
                     self.set(
                         on,
-                        Rule::Break(Ind::Col(
-                            jr.0,
-                            self.cfg.join_on.indent.map_or(self.ind(), |i| i as isize),
-                        )),
+                        Rule::Break(Ind::Col(jr.0, self.ind_or(self.cfg.join_on.indent))),
                     );
                     self.set(er.0, Rule::Flat(Sp::One));
                     self.condition_keep(e, on);

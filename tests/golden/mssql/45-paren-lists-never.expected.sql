@@ -2,7 +2,7 @@ select x
 from t
 where z in ('first value', 'second value')
 select concat(
-               FirstPartOfTheName
+                 FirstPartOfTheName
              , SecondPartOfTheName
              , ThirdPart
              ) as c

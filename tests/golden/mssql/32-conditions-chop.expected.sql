@@ -4,16 +4,16 @@ where a = 1 and b = 2
 select *
 from t
 where alpha_column = 1
-  and beta_column = 2
-   or gamma_column = 3
-  and delta_column = 4
+    and beta_column = 2
+     or gamma_column = 3
+    and delta_column = 4
 select *
 from t
 where (
-        a = 1
-        or b = 2
+          a = 1
+          or b = 2
       )
-  and c = 3
+    and c = 3
 select k
 from t
 group by k

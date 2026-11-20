@@ -425,6 +425,29 @@ impl Builder<'_> {
         self.cfg.indent as isize
     }
 
+    /// A construct's own indent setting, else one indent level.
+    pub fn ind_or(&self, v: Option<usize>) -> isize {
+        v.map_or(self.ind(), |v| v as isize)
+    }
+
+    /// The block indent of the current condition's parenthesised groups.
+    pub fn groups_indent(&self) -> isize {
+        let c = self.cfg;
+        let g = match self.ctx {
+            Ctx::Where => &c.where_.groups,
+            Ctx::Having => &c.having.groups,
+            Ctx::JoinOn => &c.join_on.groups,
+            Ctx::CaseWhen => &c.case_when.groups,
+            Ctx::If => &c.if_condition.groups,
+            Ctx::While => &c.while_condition.groups,
+            Ctx::MergeOn => &c.merge_on.groups,
+            Ctx::MergeWhen => &c.merge_when_condition.groups,
+            Ctx::Check => &c.check_constraint.groups,
+            Ctx::Other => &c.other_conditions.groups,
+        };
+        self.ind_or(g.indent)
+    }
+
     /// The top-level `and` / `or` chain settings of a condition.
     pub fn chain_style(&self, ctx: Ctx) -> WrapStyle {
         let c = self.cfg;
@@ -574,13 +597,19 @@ impl Builder<'_> {
             Wrap::ChopIfLong | Wrap::Always => {
                 let g = self.group(open, close, st.keep);
                 self.l.groups[g].force = st.wrap == Wrap::Always;
-                self.set(first.0, Rule::BreakIf(g, Ind::Col(open, 2), Sp::No));
+                self.set(
+                    first.0,
+                    Rule::BreakIf(g, Ind::Col(open, self.ind()), Sp::No),
+                );
                 if st.comma == Comma::Leading {
                     self.comma_chop(items, g, Ind::Col(open, 0));
                 } else {
                     for w in items.windows(2) {
                         self.set(w[0].1 + 1, Rule::FlatIn(g, Sp::No));
-                        self.set(w[1].0, Rule::BreakIf(g, Ind::Col(open, 2), Sp::One));
+                        self.set(
+                            w[1].0,
+                            Rule::BreakIf(g, Ind::Col(open, self.ind()), Sp::One),
+                        );
                     }
                 }
                 self.set(close, Rule::BreakIf(g, Ind::Col(open, 0), Sp::No));

@@ -8,10 +8,10 @@ select k, count(*)
 from t
 group by k
 having count(*) > 1
-  and (
-        max(v) > 2
-        or min(v) < 0
-      )
+    and (
+            max(v) > 2
+            or min(v) < 0
+        )
 select *
 from t
 join u

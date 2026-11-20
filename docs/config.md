@@ -112,15 +112,16 @@ comma = "leading"
 [where]
 wrap = "always"
 keep_line_breaks = true
-indent = 2                # `and` 2 in from `where` (`or` 3, so predicates line up)
+# indent = 4              # `and` this far in from `where`, `or` one more; unset: `indent`
 [where.groups]
 wrap = "chop_if_long"
 keep_line_breaks = true
+# indent = 4              # operands this far in from `(`; unset: `indent` (every .groups)
 
 [having]
 wrap = "always"
 keep_line_breaks = true
-indent = 2
+# indent = 4
 [having.groups]
 wrap = "chop_if_long"
 keep_line_breaks = true
@@ -189,6 +190,7 @@ keep_line_breaks = true
 [window]
 wrap = "chop_if_long"
 keep_line_breaks = true
+# indent = 4              # clauses this far in from the select item; unset: `indent`
 [window.partition_by]
 wrap = "never"
 keep_line_breaks = true
@@ -276,6 +278,7 @@ keep_line_breaks = true
 wrap = "always"
 comma = "leading"
 align_types = true
+# indent = 4              # parameters this far in from `create`; unset: `indent`
 
 [view_columns]
 wrap = "never"
@@ -301,13 +304,15 @@ What each key accepts today. Any other value of a known key is rejected with
 | `group_by.*`, `order_by.*` (`wrap`, `keep_line_breaks`, `comma`) | ALL; `true`, `false`; `leading`, `trailing` | `never`, `true`, `leading` |
 | `where.wrap`, `having.wrap` | ALL | `always` |
 | `join_on.wrap` | ALL | `never` |
-| `where.indent`, `having.indent` | 0 to 16 (`and` this far in from the keyword, `or` one more) | 2 |
+| `where.indent`, `having.indent` | 0 to 16 (`and` this far in from the keyword, `or` one more) | unset: `indent` |
 | `join_on.indent` | 0 to 16 (`on` this far in from `join`; `and` / `or` under `on`) | unset: `indent` |
 | `case_when.wrap`, `if_condition.wrap`, `while_condition.wrap`, `merge_on.wrap`, `merge_when_condition.wrap`, `check_constraint.wrap`, `other_conditions.wrap` | `never` only (no broken layout for these chains yet) | `never` |
 | `<condition>.keep_line_breaks` (all ten conditions) | `true`, `false` | `true` |
 | `<condition>.groups.wrap` (all ten) | ALL | `chop_if_long` |
 | `<condition>.groups.keep_line_breaks` (all ten) | `true`, `false` | `true` |
+| `<condition>.groups.indent` (all ten) | 0 to 16 (block operands this far in from the `(`) | unset: `indent` |
 | `window.wrap` | ALL | `chop_if_long` |
+| `window.indent` | 0 to 16 (block clauses this far in from the select item) | unset: `indent` |
 | `window.keep_line_breaks`, `window.frame.keep_line_breaks` | `true`, `false` | `true` |
 | `window.partition_by.*`, `window.order_by.*` | ALL; `true`, `false`; `leading`, `trailing` | `never`, `true`, `leading` |
 | `exists.wrap` | `always` only | `always` |
@@ -331,6 +336,7 @@ What each key accepts today. Any other value of a known key is rejected with
 | `alter_table.wrap` | `never`, `chop_if_long`, `always` (not `if_long`) | `never` |
 | `alter_table.keep_line_breaks` | `true`, `false` | `true` |
 | `routine_params.wrap` | `always` only | `always` |
+| `routine_params.indent` | 0 to 16 (parameters this far in from `create`) | unset: `indent` |
 | `routine_params.comma` | `leading`, `trailing` | `leading` |
 | `routine_params.align_types` | `true`, `false` | `true` |
 
@@ -368,9 +374,11 @@ exactly as written, so nothing breaks, but the result may look odd (with
 `indent` is one level: statement blocks (`begin … end`, `if` bodies),
 clause continuation lines (a join's `on`, `create index … on`, `alter table`
 operations, trigger lines), subquery and CTE contents, `case` branches, table
-columns and `merge` actions. Alignment offsets (`and` 2 in under `where`,
-`or` 3 in, leading commas 2 left of the items) and block contents (2 in from
-the `(`) don't change with it.
+columns and `merge` actions. It is also the default of every construct's own
+`indent` key (`where.indent`, `having.indent`, `join_on.indent`,
+`<condition>.groups.indent`, `window.indent`, `routine_params.indent`) and the
+offset of chopped parenthesised lists. Leading commas stay 2 left of their
+items.
 
 The case keys apply to what `case.rs` already re-cases: keywords (and date
 parts in `dateadd`-style functions), built-in function names (and `@@`
@@ -470,8 +478,9 @@ function argument such as `iif(…)`, a `set` value).
 | `*.keep_line_breaks` | Keep when reformatting: line breaks |
 | `*.groups.wrap` | Wrapping: parenthesized expression (the common "Parenthesized expression" option; the SQL scheme has none of its own) |
 
-The chain, broken: `where` / `having` put `and` 2 in from the keyword and
-`or` 3 in (R10); `join … on` puts them under `on` (R9). The other chains
+The chain, broken: `where` / `having` put `and` `where.indent` /
+`having.indent` in from the keyword (default: one indent level) and `or` one
+more (R10); `join … on` puts them under `on` (R9). The other chains
 have only `never` (on one line, or as written with `keep_line_breaks`).
 
 ```sql
@@ -500,8 +509,8 @@ if @a = 1
 if @a = 1 and @b = 2
 ```
 
-The groups, broken, are blocks: `(` ends its line, one operand per line 2 in
-from the `(` with `and` / `or` leading, `)` under the `(`.
+The groups, broken, are blocks: `(` ends its line, one operand per line
+`groups.indent` in from the `(` (default: one indent level) with `and` / `or` leading, `)` under the `(`.
 
 ```sql
 -- before
@@ -553,7 +562,8 @@ broken too.
 | `frame.keep_line_breaks` | Keep when reformatting: line breaks |
 
 Broken, the window is a block: `(` ends the line, `partition by`, `order by`
-and the frame each start a line 2 in from the select item, `)` under the
+and the frame each start a line `window.indent` (default: one indent level) in
+from the select item, `)` under the
 item. Filled (`if_long`), a clause that doesn't fit starts a line at the
 same column and `)` stays at the end. Inside a `case`, the block lines up
 with its function instead of the select item. The lists after `partition
@@ -686,7 +696,7 @@ select case when a = 1 then 'one' else 'other' end as k
 All take `wrap`, `keep_line_breaks`, `comma`. Filled (`if_long`, the
 default for `insert_columns` and `values.row`, R16), continuation lines start
 under the first item, leading commas under the `(` (which gets a space after
-it). Chopped, the list is a block, items 2 in from the `(`. For
+it). Chopped, the list is a block, items one indent level in from the `(`. For
 `index_columns`, the `(` still moves to the next line when `on t (…)`
 doesn't fit (R21), except under `always`.
 

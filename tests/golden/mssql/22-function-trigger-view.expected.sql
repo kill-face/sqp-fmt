@@ -1,7 +1,7 @@
 create function dbo.fnAdd
 (
-  @a int
-, @b int
+    @a int
+  , @b int
 )
 returns int as
 begin

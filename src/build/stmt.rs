@@ -328,19 +328,25 @@ impl Builder<'_> {
         }
     }
 
-    /// One parameter per line 2 in from `create`, with leading commas at
-    /// the `create` column or trailing commas.
+    /// One parameter per line `routine_params.indent` in from `create`;
+    /// leading commas 2 left of the parameters (so the names line up, as in
+    /// a select list), or trailing commas.
     fn param_lines(&mut self, create: usize, items: &[R]) {
         let Some(first) = items.first() else { return };
-        self.set(first.0, Rule::Break(Ind::Col(create, 2)));
         let leading = self.cfg.routine_params.comma == Comma::Leading;
+        let mut pi = self.ind_or(self.cfg.routine_params.indent);
+        if leading {
+            // `, @name`: the comma and its space need 2 columns.
+            pi = pi.max(2);
+        }
+        self.set(first.0, Rule::Break(Ind::Col(create, pi)));
         for w in items.windows(2) {
             if leading {
-                self.set(w[0].1 + 1, Rule::Break(Ind::Col(create, 0)));
+                self.set(w[0].1 + 1, Rule::Break(Ind::Col(create, pi - 2)));
                 self.set(w[1].0, Rule::Flat(Sp::One));
             } else {
                 self.set(w[0].1 + 1, Rule::Flat(Sp::No));
-                self.set(w[1].0, Rule::Break(Ind::Col(create, 2)));
+                self.set(w[1].0, Rule::Break(Ind::Col(create, pi)));
             }
         }
     }

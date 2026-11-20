@@ -154,6 +154,7 @@ last column leaves it out.
 | 2026-11-19 | 417 / 510 | 51995 / 65365 (79.55%) | 0 | 0 | 51956 / 52653 (98.68%) | STYLE.md changes 1 and 2 (boolean blocks, window blocks; R25, R26). The changed lines left: the two changes (~320 lines), blank-line runs collapsed (~100), corpus inconsistencies where the majority rule wins (inline named constraints, trailing-comma lists, misaligned columns, `merge … on` indented), and the generated seed file |
 | 2026-11-19 | 417 / 510 | 51995 / 65365 (79.55%) | 0 | 0 | 51956 / 52653 (98.68%) | Configuration file (`sqp-fmt.toml`, docs/config.md); no file = the same output as before, byte for byte. A window or group written over several lines now breaks the list or `case` around it (none in the test bed) |
 | 2026-11-20 | 416 / 510 | 51503 / 65365 (78.79%) | 0 | 0 | 51464 / 52653 (97.74%) | A CTE's `(` 4 in from `with` also when there's one CTE (was: from its name, as DataGrip does); `where.indent` / `having.indent` and `join_on.indent`. The ~490 lines more that change are single-CTE queries moving left |
+| 2026-11-20 | 407 / 510 | 51138 / 65365 (78.23%) | 0 | 0 | 51099 / 52653 (97.05%) | Every offset defaults to `indent` (4); `and exists (`: the `(` 4 in from its `and`: `where` / `having` `and` (was 2), logical-block and window contents (was 2), procedure parameters (was 2), chopped parenthesised lists (was 2); each has its own `indent` key (`<condition>.groups.indent`, `window.indent`, `routine_params.indent`). The corpus mostly uses +2, hence the drop |
 
 ## Decisions
 

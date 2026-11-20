@@ -12,8 +12,8 @@ create table dbo.Widget
 go
 create procedure dbo.GetWidgets
 (
-  @minPrice decimal(10, 2),
-  @name nvarchar(100) = null
+    @minPrice decimal(10, 2),
+    @name nvarchar(100) = null
 ) as
 begin
     set nocount on;
@@ -21,7 +21,7 @@ end
 go
 create index IX_Widget_Name
     on dbo.Widget (
-                    Name
+                      Name
                   , Code
                   , Id
                   ) include (Price)
@@ -30,12 +30,12 @@ alter table dbo.Widget
     add constraint FK_B foreign key (Code) references dbo.B (Code)
 go
 create view dbo.vWidget (
-                          WidgetIdentifier,
-                          WidgetName,
-                          WidgetCodeValue,
-                          WidgetOwnerIdentifier,
-                          WidgetCreatedAt,
-                          WidgetNote
+                            WidgetIdentifier,
+                            WidgetName,
+                            WidgetCodeValue,
+                            WidgetOwnerIdentifier,
+                            WidgetCreatedAt,
+                            WidgetNote
                         ) as
     select Id, Name, Code, OwnerId, CreatedAt, Note
     from dbo.Widget

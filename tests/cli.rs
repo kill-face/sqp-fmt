@@ -10,7 +10,7 @@ use std::process::{Command, Output, Stdio};
 const SQL: &str = "select a, b from t where (x = 1 or y = 2)\n";
 const DEFAULT: &str = "select a, b\nfrom t\nwhere (x = 1 or y = 2)\n";
 /// `SQL` with `[where.groups] wrap = "always"`.
-const BLOCK: &str = "select a, b\nfrom t\nwhere (\n        x = 1\n        or y = 2\n      )\n";
+const BLOCK: &str = "select a, b\nfrom t\nwhere (\n          x = 1\n          or y = 2\n      )\n";
 /// `SQL` with `keyword_case = "upper"`.
 const UPPER: &str = "SELECT a, b\nFROM t\nWHERE (x = 1 OR y = 2)\n";
 
@@ -304,7 +304,7 @@ fn dialect_sections_layer_over_the_general_style() {
     let out = run(&["q.sql"], &t.0, None);
     assert_eq!(
         stdout(&out),
-        "SELECT a, b\nFROM t\nWHERE (\n        x = 1\n        OR y = 2\n      )\n"
+        "SELECT a, b\nFROM t\nWHERE (\n          x = 1\n          OR y = 2\n      )\n"
     );
     // mssql: its section's key replaces the general one; the rest inherited.
     let out = run(&["--dialect", "mssql", "q.sql"], &t.0, None);

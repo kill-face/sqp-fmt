@@ -1,14 +1,14 @@
 select x
 from t
 where y in (1, 2, 3)
-  and z in (
-             'first value',
-             'second value',
-             'third value',
-             'fourth value'
-           )
+    and z in (
+                 'first value',
+                 'second value',
+                 'third value',
+                 'fourth value'
+             )
 select coalesce(
-                 a
+                   a
                , b
                ) as c
 from t

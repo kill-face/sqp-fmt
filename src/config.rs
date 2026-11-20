@@ -289,7 +289,8 @@ section! {
         keep_line_breaks: bool = true,
         /// Columns from the clause keyword to a broken `and` (`or` one
         /// more, so the predicates line up when this is 2): 0 to 16.
-        indent: usize = 2,
+        /// Unset: one indent level (`indent`).
+        indent: Option<usize> = None,
         /// Parenthesised `and` / `or` groups (logical blocks, R25).
         groups: Groups = Groups::default(),
     }
@@ -327,8 +328,9 @@ section! {
 
 section! {
     /// Parenthesised `and` / `or` groups, `( a and b )` (R25). Broken, a
-    /// group is a block: `(` ends its line, one operand per line 2 in from
-    /// the `(` with `and` / `or` leading, `)` on its own line under the `(`.
+    /// group is a block: `(` ends its line, one operand per line `indent`
+    /// in from the `(` with `and` / `or` leading, `)` on its own line under
+    /// the `(`.
     Groups {
         /// How a group wraps: `never` keeps it on one line, `if_long` fills
         /// it (continuation lines under its first operand, `)` at the end),
@@ -338,13 +340,16 @@ section! {
         /// A group written with a line break after its `(` is a block,
         /// whatever `wrap` says.
         keep_line_breaks: bool = true,
+        /// Columns from the `(` to a block's operands: 0 to 16. Unset: one
+        /// indent level (`indent`).
+        indent: Option<usize> = None,
     }
 }
 
 section! {
     /// `over (partition by … order by … frame)` (R26). Broken, it's a
-    /// block: `(` ends the line, each clause on its own line 2 in from the
-    /// start of the select item, `)` under the item.
+    /// block: `(` ends the line, each clause on its own line `indent` in
+    /// from the start of the select item, `)` under the item.
     Window {
         /// How the clauses wrap: `never` keeps them on one line, `if_long`
         /// fills them, `chop_if_long` makes a block when it doesn't fit,
@@ -353,6 +358,9 @@ section! {
         /// A window written over several lines is a block, whatever `wrap`
         /// says.
         keep_line_breaks: bool = true,
+        /// Columns from the start of the select item to a block's clauses:
+        /// 0 to 16. Unset: one indent level (`indent`).
+        indent: Option<usize> = None,
         /// The list after `partition by`.
         partition_by: KeptList = KeptList::default(),
         /// The list after `order by`.
@@ -508,6 +516,9 @@ section! {
         comma: Comma = Comma::Leading,
         /// Align the parameters' types.
         align_types: bool = true,
+        /// Columns from `create` / `alter` to a parameter: 0 to 16. Unset:
+        /// one indent level (`indent`).
+        indent: Option<usize> = None,
     }
 }
 
@@ -894,9 +905,7 @@ impl Config {
         v.wrap("join_on.wrap", j.wrap, ALL);
         v.flag("join_on.keep_line_breaks", j.keep_line_breaks, BOOLS);
         v.groups("join_on.groups", &j.groups);
-        if let Some(i) = j.indent {
-            v.indent("join_on.indent", i);
-        }
+        v.indent("join_on.indent", j.indent);
         for (key, c) in [
             ("case_when", &self.case_when),
             ("if_condition", &self.if_condition),
@@ -911,6 +920,7 @@ impl Config {
 
         let w = &self.window;
         v.wrap("window.wrap", w.wrap, ALL);
+        v.indent("window.indent", w.indent);
         v.flag("window.keep_line_breaks", w.keep_line_breaks, BOOLS);
         v.list("window.partition_by", &w.partition_by, ALL, COMMAS);
         v.list("window.order_by", &w.order_by, ALL, COMMAS);
@@ -980,6 +990,7 @@ impl Config {
         );
         let rp = &self.routine_params;
         v.wrap("routine_params.wrap", rp.wrap, &[Always]);
+        v.indent("routine_params.indent", rp.indent);
         v.comma("routine_params.comma", rp.comma, COMMAS);
         v.flag("routine_params.align_types", rp.align_types, BOOLS);
         v.list("view_columns", &self.view_columns, ALL, COMMAS);
@@ -1050,10 +1061,13 @@ impl Validator {
             g.keep_line_breaks,
             &[true, false],
         );
+        self.indent(&format!("{key}.indent"), g.indent);
     }
 
-    fn indent(&mut self, key: &str, v: usize) {
-        if v > 16 {
+    fn indent(&mut self, key: &str, v: Option<usize>) {
+        if let Some(v) = v
+            && v > 16
+        {
             self.problem(key, format!("{key} {v} is out of range (0 to 16)"));
         }
     }

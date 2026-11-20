@@ -127,7 +127,7 @@ The vocabulary is JetBrains':
 | `lparen_on_new_line` | Opening parenthesis on a new line (`SUBQUERY_OPENING`) |
 
 For a parenthesised construct, "chopped" is the block layout of changes 1
-and 2 (`(` ends its line, contents 2 in from the `(` column, `)` on its own
+and 2 (`(` ends its line, contents one indent (4) in from the `(` column, `)` on its own
 line under the `(`): it stands for JetBrains' separate "new line after `(`",
 "place `)` on new line" and "align when multiline" options. Keeping line
 breaks is how blocks already work: the author's line break after `(` (for a
@@ -254,13 +254,14 @@ outer apply
 
 ### R10 where / having (`10-where`)
 
-One predicate per line: `and` 2 in from `where` (`where.indent`), `or` 3 in so the
-predicates line up (test bed: `and` +2 205 times, `or` +3 6 of 6).
+One predicate per line: `and` one indent (4) in from `where` (`where.indent`),
+`or` one more. (The test bed uses `and` +2 and `or` +3, so predicates line up
+under `where`; `where.indent = 2` gives that.)
 
 ```sql
 where a = 1
-  and b = 2
-   or c = 3
+    and b = 2
+     or c = 3
 ```
 
 ### R11 group by / order by (`11-group-order`)
@@ -271,8 +272,8 @@ On the clause line; the author's line breaks in the list are kept.
 
 The query starts on the line after `(`, 4 in from the `(`; `)` under the
 `(`. The `(` of an `exists` subquery goes on its own line (test bed: 108 of
-108): 4 in from `if` for `if exists`, from `where` for `and exists` in a
-`where` chain, else from `[not] exists`. Other subqueries keep their `(`
+108): 4 in from `if` for `if exists`, from the line its `and` / `or` starts
+for `and exists` in a `where` chain, else from `[not] exists`. Other subqueries keep their `(`
 where it was written (`in (`, `= (`, `from (`).
 
 ```sql
@@ -375,8 +376,9 @@ operations 4 in.
 
 ### R22 Procedures and functions (`21-procedure`, `22-function-trigger-view`)
 
-A parenthesised parameter list: `(` and `)` on their own lines, parameters 2
-in with leading commas at the `create` column, types aligned. `as` where the
+A parenthesised parameter list: `(` and `)` on their own lines, parameters one
+indent in (`routine_params.indent`) with leading commas 2 left of them, types
+aligned. `as` where the
 author put it (`) as` or its own line); `begin` / `end` at the `create`
 column. `returns` starts a line.
 
@@ -403,8 +405,8 @@ Trigger: `on`, `after …` and `as` each on a line 4 in, `begin` at the
 ### R25 Logical blocks (`24-boolean-blocks`, STYLE.md change 1)
 
 As in "Change 1" above: a parenthesised `and` / `or` group is a block when
-the author put a line break after `(`, or it doesn't fit; contents 2 in from
-`(`, one operand per line with `and` / `or` leading, `)` under `(`.
+the author put a line break after `(`, or it doesn't fit; contents one indent in from
+`(` (`<condition>.groups.indent`), one operand per line with `and` / `or` leading, `)` under `(`.
 A block can't be on one line, so a list, chain or `case` around it is broken
 too (`29-window-line-break`).
 
@@ -453,11 +455,11 @@ is what's implemented.
   `keep_line_breaks` instead makes a group with a line break after its `(`
   (a window with any line break) a whole block, and chops a whole
   `chop_if_long` list with a line break in it.
-- Subquery contents go 4 in from their `(`; change 1's 2-in rule is applied
-  to boolean groups only.
+- Subquery contents go 4 in from their `(`, as do boolean groups (change 1
+  was 2 in until 2026-11-20).
 - Change 1 also reshapes the seed scripts' `when matched and (` predicates
   (written with `(` ending the line, contents 4 in from `merge` and trailing
-  `or`): contents now go 2 in from the `(`, far right of `merge`. If blocks
+  `or`): contents now go one indent in from the `(`, far right of `merge`. If blocks
   whose `(` ends a line should indent from that line instead, that's a
   one-line change in `nested()` (`src/build/expr.rs`).
 - `in (subquery)` keeps `(` on the `in` line (the reference output; the test

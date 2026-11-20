@@ -284,10 +284,12 @@ impl Builder<'_> {
         self.flatten_bool(e, &mut operands, &mut ops);
         self.in_ctx(ctx, |b| {
             for (k, x) in operands.iter().enumerate() {
-                // `and exists (`: the `(` one indent in from the clause
-                // keyword.
+                // `and exists (`: the `(` one indent in from the line its
+                // `and` / `or` starts (the clause keyword's line when the
+                // chain is on one line).
                 if k > 0 {
-                    b.exists_paren = Some(Ind::Col(kw, b.ind()));
+                    let anchor = ops.get(k - 1).copied().unwrap_or(kw);
+                    b.exists_paren = Some(Ind::LineOf(anchor, b.ind()));
                 }
                 b.expr(x);
                 b.exists_paren = None;
@@ -404,6 +406,7 @@ impl Builder<'_> {
         }
         if is_bool(inner) {
             let st = self.groups_style();
+            let gi = self.groups_indent();
             // A group written with a line break after `(` is a block.
             let block = st.wrap == Wrap::Always || (st.keep && self.nl_before(ir.0));
             let g = if block || matches!(st.wrap, Wrap::ChopIfLong | Wrap::IfLong) {
@@ -421,9 +424,9 @@ impl Builder<'_> {
             }
             match g {
                 Some(g) if block || st.wrap == Wrap::ChopIfLong => {
-                    self.set(ir.0, Rule::BreakIf(g, Ind::Col(open, 2), Sp::No));
+                    self.set(ir.0, Rule::BreakIf(g, Ind::Col(open, gi), Sp::No));
                     for op in ops {
-                        self.set(op, Rule::BreakIf(g, Ind::Col(open, 2), Sp::One));
+                        self.set(op, Rule::BreakIf(g, Ind::Col(open, gi), Sp::One));
                         self.set(op + 1, Rule::Flat(Sp::One));
                     }
                     self.set(close, Rule::BreakIf(g, Ind::Col(open, 0), Sp::No));
@@ -541,6 +544,7 @@ impl Builder<'_> {
             self.set(open, Rule::Flat(Sp::One));
         }
         let ws = self.cfg.window.clone();
+        let wi = self.ind_or(ws.indent);
         let item = self.item.unwrap_or(fr.0);
         let g = self.group(open, close, false);
         // Written over several lines: a block. (Filled, only a line break
@@ -627,7 +631,7 @@ impl Builder<'_> {
             _ if block || ws.wrap == Wrap::ChopIfLong => {
                 for (k, &c) in clauses.iter().enumerate() {
                     let flat = if k == 0 { Sp::No } else { Sp::One };
-                    self.set(c, Rule::BreakIf(g, Ind::Col(item, 2), flat));
+                    self.set(c, Rule::BreakIf(g, Ind::Col(item, wi), flat));
                 }
                 self.set(close, Rule::BreakIf(g, Ind::Col(item, 0), Sp::No));
             }
@@ -638,7 +642,7 @@ impl Builder<'_> {
                     if k == 0 {
                         self.set(c, Rule::Flat(Sp::No));
                     } else {
-                        self.set(c, Rule::Fill(g, Ind::Col(item, 2), Sp::One));
+                        self.set(c, Rule::Fill(g, Ind::Col(item, wi), Sp::One));
                     }
                 }
                 self.set(close, Rule::Flat(Sp::No));
