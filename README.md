@@ -29,23 +29,42 @@ style is in [STYLE.md](STYLE.md).
   anything unknown keeps its layout.
 - `src/case.rs`: keyword / built-in function / system type case, deciding
   identifiers by the AST.
+- `src/config.rs`: the configuration file (`tsqlfmt.toml`): the schema (one
+  struct per section, defaults = STYLE.md), discovery, loading, and the
+  table of implemented values (anything else is rejected); `docs/config.md`
+  is its reference.
 - `src/corpus.rs`: the `corpus` progress measure.
 - `src/main.rs`: the `tsqlfmt` command.
 
 ## Formatting
 
-`tsqlfmt [FILE]` formats FILE (or stdin) to stdout. For conform.nvim:
+`tsqlfmt [--config FILE] [--stdin-filepath PATH] [FILE | -]` formats FILE
+(or stdin) to stdout. The layout comes from the first `tsqlfmt.toml` in
+FILE's directory or above it (for stdin: above `--stdin-filepath`'s
+directory, else the current one), or `--config FILE`; with none, the house
+style of [STYLE.md](STYLE.md). [docs/config.md](docs/config.md) has every
+key. A bad configuration is an error (exit code 2, the message on stderr
+points at the key, nothing on stdout).
+
+For conform.nvim, pass the buffer's path so the right `tsqlfmt.toml` is
+found:
 
 ```lua
 require("conform").setup({
   formatters_by_ft = { sql = { "tsqlfmt" } },
-  formatters = { tsqlfmt = { command = "tsqlfmt", stdin = true } },
+  formatters = {
+    tsqlfmt = {
+      command = "tsqlfmt",
+      args = { "--stdin-filepath", "$FILENAME" },
+      stdin = true,
+    },
+  },
 })
 ```
 
 Safety: each batch's output is tokenized again and compared with the
 input's tokens, comments included; only whitespace may differ, and case only
-for the words the formatter lower-cased. If they differ, or formatting
+for the words the formatter re-cased. If they differ, or formatting
 panics, that batch is emitted exactly as written. Batches that don't parse,
 `@formatter:off` … `@formatter:on` lines, `GO` lines and SQLCMD lines are
 left as written too. CRLF / LF, a BOM and a missing final newline are kept
@@ -81,8 +100,11 @@ ends with a different token.
 unchanged, the batches the safety net left as written (should be 0), the
 files where formatting twice differs from formatting once (should be 0), the
 slowest file and the files with the biggest diffs. Golden tests: each
-`tests/golden/NAME.sql` must format to `NAME.expected.sql`
-(`TSQLFMT_BLESS=1 cargo test` rewrites the expected files; review the diff).
+`tests/golden/NAME.sql` must format to `NAME.expected.sql`, with
+`NAME.toml` as its configuration if there is one, else the defaults
+(`TSQLFMT_BLESS=1 cargo test` rewrites the expected files; review the
+diff). `tests/cli.rs` tests the command: finding `tsqlfmt.toml`, `--config`,
+`--stdin-filepath`, configuration errors.
 
 ## Status
 
@@ -113,6 +135,7 @@ last column leaves it out.
 | 2026-11-19 | 317 / 510 | 49825 / 65365 (76.23%) | 0 | 0 | 49787 / 52653 (94.56%) | Core: printer, safety net, case; source layout kept, statements at column 0 |
 | 2026-11-19 | 443 / 510 | 52292 / 65365 (80.00%) | 0 | 0 | 52253 / 52653 (99.24%) | Statement families: select / from / join / where, CTEs, subqueries, insert / values / update / delete / merge, case, create table / index / alter table, procedures / functions / views / triggers, declare / set, if / while / try blocks (STYLE.md rules R1-R24, R27) |
 | 2026-11-19 | 417 / 510 | 51995 / 65365 (79.55%) | 0 | 0 | 51956 / 52653 (98.68%) | STYLE.md changes 1 and 2 (boolean blocks, window blocks; R25, R26). The changed lines left: the two changes (~320 lines), blank-line runs collapsed (~100), corpus inconsistencies where the majority rule wins (inline named constraints, trailing-comma lists, misaligned columns, `merge … on` indented), and the generated seed file |
+| 2026-11-19 | 417 / 510 | 51995 / 65365 (79.55%) | 0 | 0 | 51956 / 52653 (98.68%) | Configuration file (`tsqlfmt.toml`, docs/config.md); no file = the same output as before, byte for byte. A window or group written over several lines now breaks the list or `case` around it (none in the test bed) |
 
 ## Decisions
 

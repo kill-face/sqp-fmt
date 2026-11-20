@@ -106,6 +106,34 @@ where the two changes above apply or the file was simply out of style.
   file is still formatted. Placeholder templates (`values ();`, `check ()`)
   stay usable.
 
+## Configuration
+
+Each construct's layout can be changed in a `tsqlfmt.toml` (found by
+searching upward from the formatted file's directory; `--config FILE`,
+`--stdin-filepath PATH` for stdin). [docs/config.md](docs/config.md) is the
+reference: every key, its values, its JetBrains counterpart, examples, and
+what's implemented. Without the file, tsqlfmt formats as described here.
+
+The vocabulary is JetBrains':
+
+| TOML value | JetBrains wrapping option |
+|---|---|
+| `wrap = "never"` | Do not wrap |
+| `wrap = "if_long"` | Wrap if long |
+| `wrap = "chop_if_long"` | Chop down if long |
+| `wrap = "always"` | Wrap always (Chop always) |
+| `keep_line_breaks = true` | Keep when reformatting: line breaks |
+| `comma = "leading"` / `"trailing"` | Place comma: before / after element (`QUERY_EL_COMMA`, `ROUTINE_ARG_COMMA`) |
+| `lparen_on_new_line` | Opening parenthesis on a new line (`SUBQUERY_OPENING`) |
+
+For a parenthesised construct, "chopped" is the block layout of changes 1
+and 2 (`(` ends its line, contents 2 in from the `(` column, `)` on its own
+line under the `(`): it stands for JetBrains' separate "new line after `(`",
+"place `)` on new line" and "align when multiline" options. Keeping line
+breaks is how blocks already work: the author's line break after `(` (for a
+window, anywhere in it) makes the block. The defaults are the rules below,
+R1 to R27.
+
 ## Rules
 
 What `tsqlfmt` implements, rule by rule. Each has a golden test in
@@ -376,11 +404,19 @@ Trigger: `on`, `after …` and `as` each on a line 4 in, `begin` at the
 As in "Change 1" above: a parenthesised `and` / `or` group is a block when
 the author put a line break after `(`, or it doesn't fit; contents 2 in from
 `(`, one operand per line with `and` / `or` leading, `)` under `(`.
+A block can't be on one line, so a list, chain or `case` around it is broken
+too (`29-window-line-break`).
 
-### R26 Window blocks (`25-window-blocks`, STYLE.md change 2)
+### R26 Window blocks (`25-window-blocks`, `29-window-line-break`, STYLE.md change 2)
 
 As in "Change 2" above, for an `over (…)` the author wrote over several
-lines or that doesn't fit; a short one written on one line stays there.
+lines or that doesn't fit; a short one written on one line stays there. A
+window written over several lines is a block wherever it is: a select list,
+`case` or other group around it can't stay on one line then, so it is broken
+too (`29-window-line-break`; before, a window inside a one-line select list
+or `case` stayed inline). Inside a `case`, the block lines up with its
+function rather than the select item. `[window] wrap = "always"` makes every
+window a block, as in the example above.
 
 ### R27 Formatter control (`26-formatter-off`, `27-unparsed`)
 
@@ -400,8 +436,22 @@ is what's implemented.
 - A select's first item after a comment goes 4 in from `select`, left of the
   other items (test bed, 4 of 4).
 - "A long `over (…)`" is read as "doesn't fit, or written over several
-  lines"; an alternative is "always a block when it has both `partition by`
-  and `order by`", as the example above suggests.
+  lines" (`[window] wrap = "chop_if_long"`, the default, which keeps
+  `25-window-blocks` and the test bed as they are). The example in "Change 2"
+  turns a short `over (partition by a, b, c order by x)` written on one line
+  into a block, which is `[window] wrap = "always"`.
+- The JetBrains scheme says `ALIGN_AS_IN_SELECT_STATEMENT = false`,
+  `ALIGN_EQ_INSIDE_SET_CLAUSE = false`, `ALIGN_TYPE_IN_CREATE_STATEMENT =
+  false` and `ALIGN_TYPE_IN_ARGUMENT_DEFINITION = false`, but R8 aligns
+  aliases, R18 aligns `=` in `set`, R20 aligns column types and R22
+  parameter types (`ROUTINE_ARG_ALIGN_TYPES = true`; DataGrip's reference
+  output aligns the table's types too, but not `set`'s `=`). tsqlfmt follows
+  the test bed; `select_list.align_aliases`, `create_table.align_columns`
+  and `routine_params.align_types` switch it off (`set` has no key yet).
+- JetBrains keeps each line break the author wrote; tsqlfmt's
+  `keep_line_breaks` instead makes a group with a line break after its `(`
+  (a window with any line break) a whole block, and chops a whole
+  `chop_if_long` list with a line break in it.
 - Subquery contents go 4 in from their `(`; change 1's 2-in rule is applied
   to boolean groups only.
 - Change 1 also reshapes the seed scripts' `when matched and (` predicates
