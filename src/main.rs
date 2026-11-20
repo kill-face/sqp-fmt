@@ -19,8 +19,8 @@ pub(crate) fn usage() -> ExitCode {
          format files in place (directories: their .sql files); prints the files changed\n       \
          sqp-fmt --check [--config FILE] [--dialect NAME] <path>...\n         \
          print the files formatting would change; exit 1 if any, 2 on errors\n       \
-         sqp-fmt corpus [--config FILE] [--dialect NAME] [--diff FILE] [--top N] <path>...\n       \
-         sqp-fmt corpus --sqlfluff [--config FILE] <dir>\n       \
+         sqp-fmt corpus [--config FILE] [--dialect NAME] [--diff FILE] [--top N] [--errors N] <path>...\n       \
+         sqp-fmt corpus --sqlfluff [--config FILE] [--errors N] <dir>\n       \
          sqp-fmt check [--config FILE] [--dialect NAME] [--files] <path>...\n       \
          sqp-fmt spans [--config FILE] [--dialect NAME] [--details] <path>..."
     );

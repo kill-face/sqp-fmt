@@ -468,3 +468,33 @@ fn ceiling_directories_stop_the_search() {
     // proj/sqp-fmt.toml is above the ceiling proj/sub: the defaults apply.
     assert_eq!(stdout(&child.wait_with_output().unwrap()), DEFAULT);
 }
+
+#[test]
+fn corpus_sqlfluff_maps_each_fixture_directory_to_its_dialect() {
+    let t = Tree::new("sqlfluff");
+    // Formatted as postgresql: psql's \set is kept, COPY data too.
+    t.file(
+        "postgres/a.sql",
+        "\\set x 1\nselect a from t;\ncopy t from stdin;\n1\n\\.\nselect (;\n",
+    );
+    // Formatted as mssql: GO ends a batch.
+    t.file("tsql/b.sql", "select 1\ngo\nselect 2\n");
+    t.file("nosuchdialect/c.sql", "select 1\n");
+    let o = run(&["corpus", "--sqlfluff", "--errors", "1", "."], &t.0, None);
+    let out = stdout(&o);
+    assert!(
+        out.contains("| postgres | postgresql | 1 | 0 | 1 / 0 / 1 | 0 | 0 | 0 |"),
+        "{out}"
+    );
+    assert!(out.contains("./postgres/a.sql:6"), "{out}");
+    assert!(
+        out.contains("| tsql | mssql | 1 | 1 | 2 / 0 / 0 | 0 | 0 | 0 |"),
+        "{out}"
+    );
+    assert!(
+        out.contains("postgres (postgresql): most common parser errors"),
+        "{out}"
+    );
+    assert!(String::from_utf8_lossy(&o.stderr).contains("nosuchdialect"));
+    assert!(o.status.success());
+}

@@ -156,6 +156,52 @@ last column leaves it out.
 | 2026-11-20 | 416 / 510 | 51503 / 65365 (78.79%) | 0 | 0 | 51464 / 52653 (97.74%) | A CTE's `(` 4 in from `with` also when there's one CTE (was: from its name, as DataGrip does); `where.indent` / `having.indent` and `join_on.indent`. The ~490 lines more that change are single-CTE queries moving left |
 | 2026-11-20 | 407 / 510 | 51138 / 65365 (78.23%) | 0 | 0 | 51099 / 52653 (97.05%) | Every offset defaults to `indent` (4); `and exists (`: the `(` 4 in from its `and`: `where` / `having` `and` (was 2), logical-block and window contents (was 2), procedure parameters (was 2), chopped parenthesised lists (was 2); each has its own `indent` key (`<condition>.groups.indent`, `window.indent`, `routine_params.indent`). The corpus mostly uses +2, hence the drop |
 
+sqlfluff's dialect fixtures (`sqp-fmt corpus --sqlfluff corpus/sqlfluff`,
+sqlfluff 4.5.0, 2026-11-20; each sqlfluff dialect formatted as the
+sqlparser dialect beside it, the mapping and its reasons in
+`SQLFLUFF_DIALECTS`, `src/corpus.rs`). A file parses when every batch or
+statement in it does; for the clients that send one statement at a time a
+batch is "partly" formatted when some of its statements don't parse (they
+are left as written); lines changed = lines not in the longest common
+subsequence of input and output. The fixtures aren't in any house style,
+so the lines changed only say how far that is from STYLE.md:
+
+| sqlfluff | sqlparser | files | files parsing | batches formatted / partly / not | statements left as written | safety fallbacks | not idempotent | lines changed |
+|---|---|---|---|---|---|---|---|---|
+| ansi | ansi | 208 | 177 | 176 / 10 / 21 | 21 | 0 | 0 | 1252 / 1644 |
+| athena | generic | 50 | 37 | 37 / 11 / 2 | 29 | 0 | 0 | 390 / 676 |
+| bigquery | bigquery | 146 | 99 | 99 / 24 / 23 | 83 | 0 | 0 | 1605 / 2742 |
+| clickhouse | clickhouse | 64 | 24 | 24 / 24 / 16 | 443 | 0 | 0 | 1004 / 2703 |
+| databricks | databricks | 83 | 21 | 21 / 30 / 32 | 235 | 0 | 0 | 760 / 2694 |
+| db2 | generic | 23 | 10 | 10 / 7 / 6 | 85 | 0 | 0 | 185 / 902 |
+| doris | generic | 47 | 16 | 16 / 0 / 31 | 0 | 0 | 0 | 32 / 337 |
+| duckdb | duckdb | 47 | 20 | 20 / 18 / 9 | 106 | 0 | 0 | 554 / 1288 |
+| exasol | generic | 60 | 6 | 6 / 20 / 34 | 128 | 0 | 0 | 427 / 938 |
+| flink | generic | 25 | 11 | 11 / 6 / 8 | 7 | 0 | 0 | 137 / 294 |
+| greenplum | postgresql | 11 | 4 | 4 / 3 / 4 | 4 | 0 | 0 | 53 / 334 |
+| hive | hive | 48 | 29 | 29 / 9 / 10 | 21 | 0 | 0 | 225 / 449 |
+| impala | generic | 9 | 2 | 2 / 4 / 3 | 12 | 0 | 0 | 56 / 83 |
+| mariadb | mysql | 239 | 103 | 111 / 53 / 88 | 277 | 0 | 0 | 1117 / 2469 |
+| materialize | postgresql | 16 | 3 | 3 / 9 / 4 | 60 | 0 | 0 | 149 / 417 |
+| mysql | mysql | 255 | 105 | 114 / 60 / 94 | 251 | 0 | 0 | 1175 / 2458 |
+| oracle | oracle | 106 | 21 | 21 / 54 / 31 | 1328 | 0 | 0 | 1329 / 6823 |
+| postgres | postgresql | 175 | 93 | 106 / 49 / 33 | 321 | 0 | 0 | 3192 / 5575 |
+| redshift | redshift | 89 | 40 | 40 / 23 / 26 | 174 | 0 | 0 | 940 / 2510 |
+| snowflake | snowflake | 271 | 87 | 87 / 66 / 118 | 837 | 0 | 0 | 2409 / 8775 |
+| soql | generic | 3 | 1 | 1 / 0 / 2 | 0 | 0 | 0 | 3 / 7 |
+| sparksql | spark | 143 | 57 | 57 / 47 / 39 | 216 | 0 | 0 | 2292 / 4227 |
+| sqlite | sqlite | 42 | 30 | 30 / 9 / 3 | 34 | 0 | 0 | 669 / 849 |
+| starrocks | generic | 18 | 2 | 2 / 1 / 15 | 3 | 0 | 0 | 105 / 358 |
+| teradata | teradata | 18 | 7 | 6 / 6 / 5 | 44 | 0 | 0 | 103 / 412 |
+| trino | generic | 32 | 21 | 21 / 10 / 1 | 38 | 0 | 0 | 446 / 717 |
+| tsql | mssql | 191 | 89 | 256 / 0 / 194 | 0 | 0 | 0 | 2359 / 7149 |
+| vertica | generic | 43 | 19 | 19 / 16 / 8 | 79 | 0 | 0 | 773 / 1360 |
+| all | | 2462 | 1134 | 1329 / 569 / 860 | 4836 | 0 | 0 | 23741 / 59190 |
+
+The three fallbacks the fixtures had before (`- - 5` printed as `--5`, a
+comment, in ansi and sqlite; the data of `COPY ... FROM stdin` read as
+SQL in postgres) went with `Layout::apart` and the script layer.
+
 ## Decisions
 
 - Block indentation: contents at the `(` column + 2, `)` under the `(`

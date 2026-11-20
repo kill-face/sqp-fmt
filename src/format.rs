@@ -152,7 +152,8 @@ fn format_batch(
     }
     let mut text = lines.join("\n");
     text.push('\n');
-    let at = |line: usize| first_line + line;
+    // 1-based file line of a 0-based line of the batch.
+    let at = |line: usize| first_line + line + 1;
     let result = catch_unwind(AssertUnwindSafe(|| format_text(&text, off, cfg, delimiter)));
     match result {
         Ok(Ok(f)) => {

@@ -5,19 +5,185 @@
 //! defaults (no `sqp-fmt.toml` discovery); the dialect is `--dialect`, else
 //! the configuration's `[[dialect_paths]]` entry for the file, else its
 //! `dialect`.
+//!
+//! `sqp-fmt corpus --sqlfluff [--config FILE] [--errors N] <dir>`: the same
+//! for sqlfluff's dialect test fixtures (`test/fixtures/dialects/<dialect>/`
+//! of a sqlfluff checkout, or a copy), one sqlfluff dialect directory at a
+//! time with its sqlparser dialect (`SQLFLUFF_DIALECTS`), as a table; with
+//! `--errors N`, each dialect's N most common parser errors.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use crate::{collect, usage};
 
+/// sqlfluff's dialects (4.5.0) and the sqlparser dialect their fixtures are
+/// formatted as: the same dialect (by name, or renamed: `postgres`,
+/// `sparksql`, `tsql`); for a dialect sqlparser doesn't have, the one it
+/// derives from (MariaDB from MySQL; Greenplum and Materialize from
+/// PostgreSQL, with PostgreSQL's wire protocol and psql); for the rest
+/// `generic`, the union of sqlparser's grammars: they derive from no
+/// sqlparser dialect (Athena and Trino are Presto; Db2, Exasol, Flink,
+/// Vertica have grammars of their own; Doris, Impala and StarRocks only
+/// borrow their parent's syntax in part), and SOQL isn't SQL but is
+/// measured anyway (the safety net must hold on any input).
+pub const SQLFLUFF_DIALECTS: &[(&str, &str)] = &[
+    ("ansi", "ansi"),
+    ("athena", "generic"),
+    ("bigquery", "bigquery"),
+    ("clickhouse", "clickhouse"),
+    ("databricks", "databricks"),
+    ("db2", "generic"),
+    ("doris", "generic"),
+    ("duckdb", "duckdb"),
+    ("exasol", "generic"),
+    ("flink", "generic"),
+    ("greenplum", "postgresql"),
+    ("hive", "hive"),
+    ("impala", "generic"),
+    ("mariadb", "mysql"),
+    ("materialize", "postgresql"),
+    ("mysql", "mysql"),
+    ("oracle", "oracle"),
+    ("postgres", "postgresql"),
+    ("redshift", "redshift"),
+    ("snowflake", "snowflake"),
+    ("soql", "generic"),
+    ("sparksql", "spark"),
+    ("sqlite", "sqlite"),
+    ("starrocks", "generic"),
+    ("teradata", "teradata"),
+    ("trino", "generic"),
+    ("tsql", "mssql"),
+    ("vertica", "generic"),
+];
+
+/// What formatting a set of files did.
+#[derive(Default)]
+struct Measure {
+    files: usize,
+    /// Files whose every batch (statement) parses.
+    files_parsing: usize,
+    unchanged_files: usize,
+    lines: usize,
+    unchanged_lines: usize,
+    total: sqp_fmt::Stats,
+    /// (changed lines, file).
+    changed: Vec<(usize, PathBuf)>,
+    not_idempotent: Vec<PathBuf>,
+    problems: Vec<String>,
+    /// Parser error (without its position) -> (count, first "file:line").
+    errors: BTreeMap<String, (usize, String)>,
+    slowest: (Duration, PathBuf),
+}
+
+/// Formats each file twice in memory (`config_for` gives its
+/// configuration; `None`: stop, exit code 2).
+fn measure(
+    files: &[PathBuf],
+    config_for: &mut dyn FnMut(&Path) -> Option<sqp_fmt::Config>,
+) -> Option<Measure> {
+    let mut m = Measure::default();
+    for file in files {
+        let Ok(src) = std::fs::read_to_string(file) else {
+            eprintln!("{}: unreadable", file.display());
+            continue;
+        };
+        let cfg = config_for(file)?;
+        m.files += 1;
+        let t = Instant::now();
+        let (out, stats) = sqp_fmt::format_with(&src, &cfg);
+        let took = t.elapsed();
+        if took > m.slowest.0 {
+            m.slowest = (took, file.clone());
+        }
+        let a: Vec<&str> = src.lines().collect();
+        let b: Vec<&str> = out.lines().collect();
+        let same = common_lines(&a, &b);
+        m.lines += a.len();
+        m.unchanged_lines += same;
+        if out == src {
+            m.unchanged_files += 1;
+        } else {
+            m.changed.push((a.len().max(b.len()) - same, file.clone()));
+        }
+        let (again, _) = sqp_fmt::format_with(&out, &cfg);
+        if again != out {
+            m.not_idempotent.push(file.clone());
+        }
+        for (line, msg) in &stats.problems {
+            let msg: String = msg.chars().take(300).collect();
+            m.problems.push(format!("{}:{line}: {msg}", file.display()));
+        }
+        if stats.unparsed == 0 && stats.partial == 0 {
+            m.files_parsing += 1;
+        }
+        for (line, msg) in &stats.parse_errors {
+            let key = msg
+                .split_once(" at Line: ")
+                .map_or(msg.as_str(), |(k, _)| k);
+            let key: String = key.chars().take(200).collect();
+            m.errors
+                .entry(key)
+                .or_insert((0, format!("{}:{line}", file.display())))
+                .0 += 1;
+        }
+        let t = &mut m.total;
+        t.batches += stats.batches;
+        t.formatted += stats.formatted;
+        t.partial += stats.partial;
+        t.unparsed_statements += stats.unparsed_statements;
+        t.unparsed += stats.unparsed;
+        t.mismatches += stats.mismatches;
+        t.errors += stats.errors;
+        t.off += stats.off;
+    }
+    Some(m)
+}
+
+impl Measure {
+    fn fallbacks(&self) -> usize {
+        self.total.mismatches + self.total.errors
+    }
+
+    fn ok(&self) -> bool {
+        self.problems.is_empty() && self.not_idempotent.is_empty()
+    }
+
+    fn changed_lines(&self) -> usize {
+        self.changed.iter().map(|c| c.0).sum()
+    }
+
+    /// The most common parser errors, most common first.
+    fn top_errors(&self, n: usize) -> Vec<(&str, usize, &str)> {
+        let mut v: Vec<_> = self
+            .errors
+            .iter()
+            .map(|(k, (c, at))| (k.as_str(), *c, at.as_str()))
+            .collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        v.truncate(n);
+        v
+    }
+}
+
+fn pct(n: usize, d: usize) -> f64 {
+    if d == 0 {
+        0.0
+    } else {
+        100.0 * n as f64 / d as f64
+    }
+}
+
 pub fn run(args: &[String]) -> ExitCode {
     let mut diff_file: Option<String> = None;
     let mut top = 15;
     let mut roots = Vec::new();
     let mut verbose = false;
+    let mut sqlfluff = false;
+    let mut errors = 0;
     let mut cfg = sqp_fmt::Config::default();
     let mut dialect: Option<String> = None;
     let mut it = args.iter();
@@ -37,13 +203,24 @@ pub fn run(args: &[String]) -> ExitCode {
             },
             "--diff" => diff_file = it.next().cloned(),
             "--top" => top = it.next().and_then(|n| n.parse().ok()).unwrap_or(top),
+            "--errors" => match it.next().and_then(|n| n.parse().ok()) {
+                Some(n) => errors = n,
+                None => return usage(),
+            },
             "--problems" => verbose = true,
             "--list" => top = usize::MAX,
+            "--sqlfluff" => sqlfluff = true,
             _ if a.starts_with("--") => return usage(),
             _ => roots.push(a.clone()),
         }
     }
     std::panic::set_hook(Box::new(|_| {}));
+    if sqlfluff {
+        return match (roots.as_slice(), &dialect, &diff_file) {
+            ([dir], None, None) => run_sqlfluff(Path::new(dir), &cfg, errors, verbose),
+            _ => usage(),
+        };
+    }
     let base = cfg;
     let mut per_dialect: HashMap<&'static str, sqp_fmt::Config> = HashMap::new();
     let mut config_for = |path: &Path| -> Option<sqp_fmt::Config> {
@@ -85,67 +262,19 @@ pub fn run(args: &[String]) -> ExitCode {
     for r in &roots {
         collect(Path::new(r), &mut files);
     }
-
-    let mut total = sqp_fmt::Stats::default();
-    let (mut lines, mut unchanged_lines, mut unchanged_files) = (0usize, 0usize, 0usize);
-    let mut changed: Vec<(usize, PathBuf)> = Vec::new();
-    let mut not_idempotent = Vec::new();
-    let mut problems = Vec::new();
-    let mut slowest = (Duration::ZERO, PathBuf::new());
     let started = Instant::now();
-    for file in &files {
-        let Ok(src) = std::fs::read_to_string(file) else {
-            eprintln!("{}: unreadable", file.display());
-            continue;
-        };
-        let Some(cfg) = config_for(file) else {
-            return ExitCode::from(2);
-        };
-        let t = Instant::now();
-        let (out, stats) = sqp_fmt::format_with(&src, &cfg);
-        let took = t.elapsed();
-        if took > slowest.0 {
-            slowest = (took, file.clone());
-        }
-        let a: Vec<&str> = src.lines().collect();
-        let b: Vec<&str> = out.lines().collect();
-        let same = common_lines(&a, &b);
-        lines += a.len();
-        unchanged_lines += same;
-        if out == src {
-            unchanged_files += 1;
-        } else {
-            changed.push((a.len().max(b.len()) - same, file.clone()));
-        }
-        let (again, _) = sqp_fmt::format_with(&out, &cfg);
-        if again != out {
-            not_idempotent.push(file.clone());
-        }
-        for (line, msg) in &stats.problems {
-            let msg: String = msg.chars().take(300).collect();
-            problems.push(format!("{}:{line}: {msg}", file.display()));
-        }
-        total.batches += stats.batches;
-        total.formatted += stats.formatted;
-        total.partial += stats.partial;
-        total.unparsed_statements += stats.unparsed_statements;
-        total.unparsed += stats.unparsed;
-        total.mismatches += stats.mismatches;
-        total.errors += stats.errors;
-        total.off += stats.off;
-    }
-    let pct = |n: usize, d: usize| {
-        if d == 0 {
-            0.0
-        } else {
-            100.0 * n as f64 / d as f64
-        }
+    let Some(mut m) = measure(&files, &mut config_for) else {
+        return ExitCode::from(2);
     };
+    let total = &m.total;
     println!(
-        "{unchanged_files}/{} files unchanged ({:.1}%), {unchanged_lines}/{lines} lines unchanged ({:.2}%)",
-        files.len(),
-        pct(unchanged_files, files.len()),
-        pct(unchanged_lines, lines)
+        "{}/{} files unchanged ({:.1}%), {}/{} lines unchanged ({:.2}%)",
+        m.unchanged_files,
+        m.files,
+        pct(m.unchanged_files, m.files),
+        m.unchanged_lines,
+        m.lines,
+        pct(m.unchanged_lines, m.lines)
     );
     println!(
         "{} batches: {} formatted, {} partly formatted ({} statements left as written), {} left as written (don't parse), {} in @formatter:off regions",
@@ -160,29 +289,160 @@ pub fn run(args: &[String]) -> ExitCode {
         "safety fallbacks: {} token mismatches, {} internal errors; {} files not idempotent",
         total.mismatches,
         total.errors,
-        not_idempotent.len()
+        m.not_idempotent.len()
     );
     println!(
         "time: {:.0?} total, slowest {:.1?} ({})",
         started.elapsed(),
-        slowest.0,
-        slowest.1.display()
+        m.slowest.0,
+        m.slowest.1.display()
     );
-    for p in problems.iter().take(if verbose { usize::MAX } else { 10 }) {
+    for p in m
+        .problems
+        .iter()
+        .take(if verbose { usize::MAX } else { 10 })
+    {
         println!("  problem: {p}");
     }
-    for f in not_idempotent
+    for f in m
+        .not_idempotent
         .iter()
         .take(if verbose { usize::MAX } else { 10 })
     {
         println!("  not idempotent: {}", f.display());
     }
-    changed.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    m.changed
+        .sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     println!("biggest diffs (changed lines):");
-    for (n, f) in changed.iter().take(top) {
+    for (n, f) in m.changed.iter().take(top) {
         println!("{n:6}  {}", f.display());
     }
-    if problems.is_empty() && not_idempotent.is_empty() {
+    if errors > 0 {
+        println!("most common parser errors:");
+        for (msg, n, at) in m.top_errors(errors) {
+            println!("{n:6}  {msg}\n        {at}");
+        }
+    }
+    if m.ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// `corpus --sqlfluff`: each sqlfluff dialect directory under `dir` with its
+/// sqlparser dialect, as a Markdown table.
+fn run_sqlfluff(dir: &Path, base: &sqp_fmt::Config, errors: usize, verbose: bool) -> ExitCode {
+    let mut known = Vec::new();
+    let mut rows = Vec::new();
+    let mut all_ok = true;
+    for &(fluff, ours) in SQLFLUFF_DIALECTS {
+        let d = dir.join(fluff);
+        known.push(fluff);
+        if !d.is_dir() {
+            continue;
+        }
+        let mut files = Vec::new();
+        collect(&d, &mut files);
+        let cfg = base.for_dialect(ours);
+        let Some(m) = measure(&files, &mut |_| Some(cfg.clone())) else {
+            return ExitCode::from(2);
+        };
+        all_ok &= m.ok();
+        rows.push((fluff, ours, m));
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        let mut unknown: Vec<String> = entries
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| !known.contains(&n.as_str()))
+            .collect();
+        unknown.sort();
+        for n in unknown {
+            eprintln!(
+                "sqp-fmt: {}: not a sqlfluff dialect sqp-fmt knows, skipped",
+                dir.join(n).display()
+            );
+        }
+    }
+    if rows.is_empty() {
+        eprintln!(
+            "sqp-fmt: {}: no sqlfluff dialect directories",
+            dir.display()
+        );
+        return ExitCode::from(2);
+    }
+    println!(
+        "| sqlfluff | sqlparser | files | files parsing | batches formatted / partly / not | statements left as written | safety fallbacks | not idempotent | lines changed |"
+    );
+    println!("|---|---|---|---|---|---|---|---|---|");
+    let mut sum = Measure::default();
+    for (fluff, ours, m) in &rows {
+        let t = &m.total;
+        println!(
+            "| {fluff} | {ours} | {} | {} | {} / {} / {} | {} | {} | {} | {} / {} |",
+            m.files,
+            m.files_parsing,
+            t.formatted,
+            t.partial,
+            t.unparsed,
+            t.unparsed_statements,
+            m.fallbacks(),
+            m.not_idempotent.len(),
+            m.changed_lines(),
+            m.lines
+        );
+        sum.files += m.files;
+        sum.files_parsing += m.files_parsing;
+        sum.lines += m.lines;
+        sum.total.formatted += t.formatted;
+        sum.total.partial += t.partial;
+        sum.total.unparsed += t.unparsed;
+        sum.total.unparsed_statements += t.unparsed_statements;
+        sum.total.mismatches += m.fallbacks();
+        sum.not_idempotent.extend(m.not_idempotent.iter().cloned());
+        sum.changed.push((m.changed_lines(), PathBuf::new()));
+    }
+    let t = &sum.total;
+    println!(
+        "| all | | {} | {} | {} / {} / {} | {} | {} | {} | {} / {} |",
+        sum.files,
+        sum.files_parsing,
+        t.formatted,
+        t.partial,
+        t.unparsed,
+        t.unparsed_statements,
+        t.mismatches,
+        sum.not_idempotent.len(),
+        sum.changed_lines(),
+        sum.lines
+    );
+    for (fluff, _, m) in &rows {
+        for p in m
+            .problems
+            .iter()
+            .take(if verbose { usize::MAX } else { 10 })
+        {
+            println!("  {fluff}: problem: {p}");
+        }
+        for f in m
+            .not_idempotent
+            .iter()
+            .take(if verbose { usize::MAX } else { 10 })
+        {
+            println!("  {fluff}: not idempotent: {}", f.display());
+        }
+    }
+    if errors > 0 {
+        for (fluff, ours, m) in &rows {
+            println!("\n{fluff} ({ours}): most common parser errors");
+            for (msg, n, at) in m.top_errors(errors) {
+                println!("{n:6}  {msg}\n        {at}");
+            }
+        }
+    }
+    if all_ok {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
