@@ -240,6 +240,100 @@ The three fallbacks the fixtures had before (`- - 5` printed as `--5`, a
 comment, in ansi and sqlite; the data of `COPY ... FROM stdin` read as
 SQL in postgres) went with `Layout::apart` and the script layer.
 
+## Parser gaps (next work)
+
+The most common parser errors in sqlfluff's fixtures
+(`sqp-fmt corpus --sqlfluff --errors 5 corpus/sqlfluff`, 2026-11-20),
+per dialect: statements left as written, the construct, and the documented
+grammar it needs. Counts are statements; a compound statement the parser
+can't read is split at its `;`s for recovery, so its pieces count too
+(PL/SQL, MySQL and BigQuery bodies). The parser isn't changed in this
+series; each is a change for the fork, with tests, in the shape upstream
+takes.
+
+- postgresql: `analyze (verbose, skip_locked) t` (25; "ANALYZE":
+  parenthesised option list); `unique nulls [not] distinct ... with
+  (storage_parameter)` in column constraints (23; "CREATE TABLE",
+  `index_parameters`); `create` / `alter` / `drop publication` (18 + 15;
+  "CREATE PUBLICATION", "ALTER PUBLICATION"); `create` / `drop cast` (16;
+  "CREATE CAST").
+- mysql (mariadb alike): account names `'user'@'host'` in `create user`
+  (29, mariadb 58; "Specifying Account Names"); `create function` /
+  `create procedure` with a compound `begin ... end` body (26 + 18;
+  "CREATE PROCEDURE and CREATE FUNCTION Statements", "Compound Statement
+  Syntax"); `load data infile` (14; "LOAD DATA Statement"); `check table`
+  (13; "CHECK TABLE Statement"); MariaDB's `add index if not exists`
+  (12; MariaDB "ALTER TABLE").
+- mssql: `delete` without `from` (8; "DELETE (Transact-SQL)": `DELETE
+  [ FROM ] table_or_view_name`); procedure options `with encryption,
+  recompile, execute as ...` (7; "CREATE PROCEDURE", `procedure_option`);
+  index options `with (pad_index = off, ...)` (6; "CREATE INDEX",
+  `relational_index_option`); `grant` / `deny ... on object::name` (5;
+  "GRANT Object Permissions", `class ::`); `create fulltext catalog` /
+  `index` (5; "CREATE FULLTEXT CATALOG").
+- snowflake: `define <object>` (36; Snowflake DCM project definitions);
+  `alter warehouse` (33; "ALTER WAREHOUSE"); `alter task` (32; "ALTER
+  TASK"); `alter database ... set` (28; "ALTER DATABASE"); `alter dynamic
+  table ... set` (27; "ALTER DYNAMIC TABLE").
+- bigquery: `create [or replace] procedure` (9; "CREATE PROCEDURE
+  statement"); the `with(a as ..., expr)` expression (8; "WITH
+  expression"); `load data into` (8; "LOAD DATA statement"); `for ... in
+  ... do ... end for` (6; procedural language "FOR...IN"); `alter ... set
+  options (...)` (5; "ALTER TABLE SET OPTIONS statement").
+- sqlite: `insert ... default values` (5; "INSERT" syntax diagram);
+  `create virtual table ... using fts5(...)` module arguments (4 + 2;
+  "CREATE VIRTUAL TABLE": module arguments are any tokens); `reindex` (4;
+  "REINDEX"); `on conflict` after `insert ... select` (3; "UPSERT",
+  parsing ambiguity).
+- duckdb: `using sample` (17; "Samples"); `pivot` / `unpivot` statements
+  (16 + 7; "PIVOT Statement", "UNPIVOT Statement"); `create` / `drop
+  macro` (7; "CREATE MACRO"); `copy ... (per_thread_output ...)` (7;
+  "COPY Statement").
+- clickhouse: `system ...` statements (67; "SYSTEM Statements"); `create
+  database ... engine = ...` and `on cluster` (36 + 22; "CREATE
+  DATABASE"); `truncate all tables from` (36 + 36; "TRUNCATE Statements").
+- databricks: `create or refresh [private] streaming table` / `materialized
+  view` (25; Lakeflow Declarative Pipelines SQL); `create [or replace]
+  [temporary] function` with a SQL body (18; "CREATE FUNCTION (SQL and
+  Python)"); `create flow` (15; "CREATE FLOW"); `comment on catalog` and
+  `alter catalog` (12 + 12; "COMMENT ON", "ALTER CATALOG").
+- spark: `X"..."` binary literals (21; "Literals", binary literal); `add` /
+  `list file | jar` (19 + 14; "ADD FILE", "LIST FILE"); `create [or
+  replace] temporary function ... using jar` (15; "CREATE FUNCTION");
+  `create or refresh live table` (11; Delta Live Tables SQL).
+- hive: `alter database ... set dbproperties` (5; LanguageManual DDL,
+  Alter Database); `from t insert ...` multi-insert (5; LanguageManual
+  DML, "Multiple Inserts"); constraint `disable novalidate` (4;
+  LanguageManual DDL, Constraints); `as (k, v)` aliases of a table-
+  generating function (4; LanguageManual UDF, explode); `partition (...)
+  if not exists` in `insert overwrite` (3; LanguageManual DML).
+- redshift: `create database ... from integration` (14; "CREATE
+  DATABASE"); `create user ... password 'md5...'` (13; "CREATE USER");
+  `grant ... for schemas in database` (12; "GRANT", scoped permissions);
+  `create schema ... quota` (12; "CREATE SCHEMA").
+- oracle: SQL*Plus's `/` line, which ends a PL/SQL block or runs the
+  buffer (200; "SQL*Plus User's Guide", Running SQL and PL/SQL): a client
+  gap, not a parser one: the script layer has no SQL*Plus client yet, so
+  PL/SQL blocks are split at their `;`s (`dbms_output.put_line(...)`
+  128, `end loop` 83, `end if` 52); `alter session set` (78; "ALTER
+  SESSION").
+- teradata: `collect statistics` (11; "COLLECT STATISTICS"); `locking ...
+  for access` / `lock row for write` request modifiers (6 + 3; "LOCKING
+  Request Modifier"); column attributes in expressions, `'x'
+  (casespecific)` (5; "Data Type Attributes"); `del` for `delete` (3).
+- ansi: `create` / `drop cast` (13 + 5; SQL:2016 Part 2, 11.63
+  <user-defined cast definition>); `create trigger ... execute procedure`
+  (5; 11.39 <trigger definition>); `create function` with unnamed
+  parameters (4; 11.60 <SQL-invoked routine>); a parenthesised table name
+  `from (t)` (4; 7.6 <table reference>, <parenthesized joined table>).
+
+The dialects sqlparser doesn't have (athena, db2, doris, exasol, flink,
+impala, soql, starrocks, trino, vertica; formatted as `generic`) fail on
+their own syntax (Db2 `declare global temporary table`, Doris /
+StarRocks `duplicate key` and `properties`, Exasol `import`, Vertica
+`::!` casts, Trino `with (properties)`), which is a dialect
+for the fork to add, not a gap in an existing one.
+
 ## Decisions
 
 - Block indentation: contents one indent (4) in from the `(` column, `)`

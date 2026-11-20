@@ -124,7 +124,15 @@ fn measure(
             let key = msg
                 .split_once(" at Line: ")
                 .map_or(msg.as_str(), |(k, _)| k);
-            let key: String = key.chars().take(200).collect();
+            // Long "Expected: a, b, c, ..." lists cut short, keeping what
+            // was found.
+            let key = match key.rsplit_once(", found: ") {
+                Some((exp, found)) if exp.chars().count() > 100 => {
+                    let exp: String = exp.chars().take(100).collect();
+                    format!("{exp}..., found: {found}")
+                }
+                _ => key.to_string(),
+            };
             m.errors
                 .entry(key)
                 .or_insert((0, format!("{}:{line}", file.display())))
