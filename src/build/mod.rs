@@ -724,7 +724,7 @@ impl Builder<'_> {
         !self.l.raw[i]
             && matches!(&self.l.toks[i].token, Token::Word(w) if w.quote_style.is_none()
             && w.keyword != sqlparser::keywords::Keyword::NoKeyword
-            && !["end", "begin", "else", "go", "try", "catch"].iter().any(|k| w.value.eq_ignore_ascii_case(k)))
+            && !["end", "begin", "else", "try", "catch"].iter().any(|k| w.value.eq_ignore_ascii_case(k)))
     }
 
     /// Starts a statement at token `i` on a new line. A `;` written right

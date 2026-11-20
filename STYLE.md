@@ -1,27 +1,36 @@
 # Target style
 
-The baseline is JetBrains' SQL formatter (Rider / DataGrip) with the code style
-in `style/jetbrains-codestyle.xml`, as applied to T-SQL (its
-`MSSQLCodeStyleSettings` block). `style/datagrip-reference.sql` is DataGrip's
-output for `style/datagrip-reference.input.sql` with that scheme.
+One general style for every dialect sqp-fmt parses, with a section per
+dialect for the syntax only that dialect has, the way JetBrains' SQL code
+style works: a General style that each dialect inherits unless it
+overrides it. In `sqp-fmt.toml` that's the general keys and a
+`[dialects.<name>]` section per dialect ([docs/config.md](docs/config.md)).
+
+The baseline is JetBrains' SQL formatter (DataGrip / Rider) with the code
+style in `style/jetbrains-codestyle.xml`. `style/datagrip-reference.sql` is
+DataGrip's output for `style/datagrip-reference.input.sql` with that scheme
+(written for T-SQL, where the house style comes from).
 
 On top of that baseline there are two deliberate changes, both about making a
 multi-line construct read as one indented block.
 
 The formatter only changes whitespace and keyword/function/type case. It never
 adds, removes or reorders tokens: no `as` inserted, no `inner` / `outer` added,
-no `;` added, comments kept where they are.
+no `;` added, comments kept where they are. Two tokens the source had apart
+stay apart when written together they would read as something else
+(`- - 5` is not `--5`).
 
 ## Baseline highlights
 
 - Keywords, built-in functions and types lowercase; identifiers as written.
-- 4-space indent, 120-column right margin.
+- 4-space indent, 120-column right margin; every offset is one indent
+  unless its construct's `indent` key says otherwise.
 - Clauses (`from`, `join`, `where`, `group by`, `having`, `order by`) start a
   line; a short clause body stays on the clause's line
-  (`select a, b, c`, `group by o.Id, c.[Name]`).
-- `join` at the clause level, its `on` on the next line one indent in (`join_on.indent`).
-- `where` predicates: one per line, `and` / `or` indented 2 under `where`.
-- Leading commas when a list is chopped (`set`, `values`, procedure
+  (`select a, b, c`, `group by s.id, s.label`).
+- `join` at the clause level, its `on` on the next line one indent in.
+- `where` predicates: one per line, `and` / `or` one indent in from `where`.
+- Leading commas when a list is chopped (`set`, `values`, routine
   parameters, long select lists).
 - `create table` column definitions aligned in columns.
 
@@ -32,71 +41,57 @@ A parenthesised group inside a long boolean expression is laid out as a block:
 
 ```sql
 select *
-from dbo.ShipmentEvents shpEvt
-where shpEvt.EventKindCode = 6005
-  and shpEvt.IsShipped = 'L'
-  and fnInZone.Result = 'true'
-  and (
-        (
-          shpEvt.RecordedAtUtcTime >= @recordedAtUtcTimeStart
-          and shpEvt.RecordedAtUtcTime < @recordedAtUtcTimeEnd
+from loans l
+where l.status = 'out'
+    and l.renewals < 3
+    and (
+            (
+                l.due_on >= :period_start
+                and l.due_on < :period_end
+            )
+            or (
+                   l.reader_id = :reader
+                   and l.reserved = 1
+               )
         )
-        or (
-            other condition
-            and other condition
-        )
-      )
 ```
 
 The author decides what is a block: a group written with a line break after
 its `(` is kept as a block; a group written on one line stays inline unless it
 no longer fits in the margin, in which case it becomes a block.
 
-**Indentation:** a block's contents go at the column of its `(` + 2 and its
-`)` sits under the `(`, the same everywhere (including `and (` / `or (`).
-The hand-written example above drifts from that in the `or (` group; the rule
-wins:
-
-```sql
-  and (
-        (
-          shpEvt.RecordedAtUtcTime >= @recordedAtUtcTimeStart
-          and shpEvt.RecordedAtUtcTime < @recordedAtUtcTimeEnd
-        )
-        or (
-             other condition
-             and other condition
-           )
-      )
-```
+**Indentation:** a block's contents go one indent (4) in from the column of
+its `(` (`<condition>.groups.indent`) and its `)` sits under the `(`, the
+same everywhere (including `and (` / `or (`).
 
 ## Change 2: window clauses as blocks
 
 A long `over (...)` is laid out as a block: `(` ends the line, each of
-`partition by`, `order by` and the frame clause starts its own line indented
-2 past the start of the select item, and `)` lines up with the start of the
-item.
+`partition by`, `order by` and the frame clause starts its own line one
+indent past the start of the select item (`window.indent`), and `)` lines
+up with the start of the item.
 
 ```sql
 select row_number() over (
-         partition by col_a, col_b, col_c
-         order by col_x
+           partition by b.shelf_id, b.author_id
+           order by b.added_on
        ) as rn
-     , new.Code
-     , new.Name
-     , new.ShortName
-     , new.RegionId
-     , new.IsVerified
-     , new.ImportBatchId
-from NewCarrier new
+     , b.title
+     , b.subtitle
+     , b.pages
+from books b
 ```
 
-## Test bed
+## Test beds
 
-The SQL in a private T-SQL corpus (`corpus/private/`, about 510 files) is mostly in this
-style already. It is used read-only, pointed at by path: never copy those
-files into this repo. Formatting a file from it should change nothing except
-where the two changes above apply or the file was simply out of style.
+- A private T-SQL corpus (`corpus/private/`, about 510 files) mostly in
+  this style already: the house style came from it. It is used read-only,
+  pointed at by path: never copy those files into this repo. Formatting a
+  file from it should change nothing except where the two changes above
+  apply or the file was simply out of style.
+- sqlfluff's dialect test fixtures (`corpus/sqlfluff/`, git-ignored, see
+  the README): every dialect, to measure the safety net and idempotency
+  (0 fallbacks, 0 non-idempotent files in each), not to tune the style.
 
 ## Formatter control
 
@@ -137,25 +132,41 @@ R1 to R27.
 ## Rules
 
 What `sqp-fmt` implements, rule by rule. Each has a golden test in
-`tests/golden/` (input `NN-name.sql`, output `NN-name.expected.sql`). Where a
-rule comes from the test bed rather than the JetBrains scheme, the counts are
-from `corpus/private/` (house style); "keeps" means the author's line break is
-kept, and anything not covered here keeps its source layout, re-indented with
-its surroundings.
+`tests/golden/<dialect>/` (input `NN-name.sql`, output
+`NN-name.expected.sql`; the T-SQL ones under `mssql/`). Where a rule comes
+from the test bed rather than the JetBrains scheme, the counts are from
+the private corpus (house style); "keeps" means the author's line break is
+kept, and anything not covered here keeps its source layout, re-indented
+with its surroundings.
 
-Formatting is per `GO` batch. Batches that don't parse, `@formatter:off`
-regions, `GO` lines and SQLCMD lines (`:r`, `:setvar`) come out exactly as
-written; so does any batch whose output wouldn't tokenize back to the same
-tokens (the safety net). Line endings (LF / CRLF), a BOM and a missing final
-newline are kept.
+A file is read the way its dialect's client reads it (the dialect
+sections below): client commands and data come out exactly as written,
+and the SQL between them is formatted one batch at a time. Batches (for
+clients that send one statement at a time: statements) that don't parse,
+`@formatter:off` regions, and any batch whose output wouldn't tokenize
+back to the same tokens (the safety net) come out exactly as written. Line
+endings (LF / CRLF), a BOM and a missing final newline are kept.
 
-### R1 Case (`01-case`)
+## General rules (every dialect)
 
-Keywords, built-in functions, system types and `@@` functions lower-case.
-Identifiers exactly as written, decided by the AST (a word that starts an
-identifier node is one), so `Status`, `Name`, `Value` keep their case; so do
-user-defined functions and types (`dbo.fnCustom`, `dbo.MyType`). Date parts
-in `dateadd`-style functions count as keywords.
+These apply to the constructs every dialect's grammar shares, the same in
+each dialect.
+
+### R1 Case (`mssql/01-case`, `postgresql/02-case`, `mysql/02-case`)
+
+Keywords, function names and type names lower-case (`keyword_case`,
+`function_case`, `type_case`); identifiers exactly as written. What a word
+is comes from the AST: a word that starts an identifier node is an
+identifier, so `Status`, `Name`, `Value` keep their case; the name of an
+unqualified function call is a function name (`count`, `coalesce`,
+`shelf_label`), the keyword of a function with a syntax of its own (`cast`,
+`convert`, `extract`, `substring`, `trim`, ...) too; a qualified one
+(`dbo.fnTotal`, `public.Shelf_Label`) is an identifier; the name of a data
+type in a column definition, cast, declaration, parameter, return type or
+typed literal is a type name (its parameters, `max` in `varchar(max)`,
+are keywords). Other keywords are keywords. User-defined types keep their
+case; built-in types the parser only knows as names are on a per-dialect
+list (the dialect sections).
 
 ```sql
 select [Name], Status, count(*) as Cnt, getdate() as Now, @@rowcount as N
@@ -192,26 +203,6 @@ end of its line (a chopped list can't move that comma to the next line).
 select a,       -- trailing
        b        -- another
 from t -- after from
-```
-
-### R6 Blocks (`06-blocks`)
-
-`begin … end`, `begin try … end try`, `begin catch … end catch`: contents
-one indent (4) in, `end` under `begin`.
-
-### R7 if / else / while (`07-if-while`)
-
-Condition on the `if` line; the body on the next line one indent in; a
-`begin … end` body is itself indented under `if` (test bed: 35 of 35), its
-contents one more. `else` under `if`; `else if` stays on one line.
-
-```sql
-if @a > 0
-    begin
-        print 'a'
-    end
-else
-    print 'b'
 ```
 
 ### R8 Select list (`08-select-list`)
@@ -374,33 +365,30 @@ create table dbo.Widget
 when on their own line (`include` on the `on` line 8 of 11). `alter table`
 operations 4 in.
 
-### R22 Procedures and functions (`21-procedure`, `22-function-trigger-view`)
+### R22 Routine parameters (`mssql/21-procedure`, `mssql/22-function-trigger-view`)
 
-A parenthesised parameter list: `(` and `)` on their own lines, parameters one
-indent in (`routine_params.indent`) with leading commas 2 left of them, types
-aligned. `as` where the
-author put it (`) as` or its own line); `begin` / `end` at the `create`
-column. `returns` starts a line.
+A parenthesised parameter list of a procedure or function: `(` and `)` on
+their own lines, parameters one indent in (`routine_params.indent`) with
+leading commas 2 left of them, types aligned. `returns` starts a line.
 
 ```sql
-create procedure dbo.GetWidgets
+create function shelf_label
 (
-  @minPrice decimal(10, 2)
-, @name     nvarchar(100) = null
-) as
-begin
-    set nocount on;
-end
+    shelf_id integer
+  , prefix   text = 'S'
+)
+returns text
+...
 ```
 
-### R23 Triggers and views (`22-function-trigger-view`)
+### R23 Views (`mssql/22-function-trigger-view`)
 
-Trigger: `on`, `after …` and `as` each on a line 4 in, `begin` at the
-`create` column. View: the query on the next line 4 in.
+The query on the next line 4 in.
 
-### R24 declare / set / exec (`23-declare-set-exec`)
+### R24 set / declare (`mssql/23-declare-set-exec`)
 
-`=` spaced, including named arguments (`@id = @a`; 919 of 934).
+`=` spaced in `set` and `declare` assignments (T-SQL: also named
+arguments, `@id = @a`; 919 of 934).
 
 ### R25 Logical blocks (`24-boolean-blocks`, STYLE.md change 1)
 
@@ -427,13 +415,127 @@ window a block, as in the example above.
 inside a statement or across `GO`; the code after them continues at the
 indent it would have.
 
+## Dialect rules
+
+Syntax only one dialect (or its client) has. Each dialect's client syntax
+is from the client's documentation; it is recognised only in that
+dialect, and kept exactly as written. `generic`, the default dialect, has
+no client syntax: the clients conflict (`GO` and `DELIMITER` are words in
+other dialects; `\`, `.` and `!` mean different things to different
+clients).
+
+### T-SQL (`mssql`)
+
+- Batches: sqlcmd's `GO [count]` lines end a batch; `:r`, `:setvar`,
+  `:connect`, ... and `ED`, `RESET`, `QUIT`, `EXIT`, `!!` lines are sqlcmd
+  commands. A batch is sent, and so parsed, as a whole: one that doesn't
+  parse is left as written. Statements needn't end with `;`.
+- Case: the system types sqlparser only knows as names (`sysname`,
+  `datetime2`, `uniqueidentifier`, ...) are types; date parts in
+  `dateadd`-style functions (`day`, `dd`, ...) are keywords; `@@` names
+  are functions, as T-SQL reserves them for its system functions; SET
+  options, table hints and index options are keywords.
+- The procedural rules below are T-SQL's syntax; other dialects'
+  procedural code keeps its source layout (see "Other dialects").
+
+#### R6 Blocks (`mssql/06-blocks`)
+
+`begin … end`, `begin try … end try`, `begin catch … end catch`: contents
+one indent (4) in, `end` under `begin`.
+
+#### R7 if / else / while (`mssql/07-if-while`)
+
+Condition on the `if` line; the body on the next line one indent in; a
+`begin … end` body is itself indented under `if` (test bed: 35 of 35), its
+contents one more. `else` under `if`; `else if` stays on one line.
+
+```sql
+if @a > 0
+    begin
+        print 'a'
+    end
+else
+    print 'b'
+```
+
+#### R22b Routine bodies (`mssql/21-procedure`, `mssql/22-function-trigger-view`)
+
+`as` where the author put it (`) as` or its own line); `begin` / `end` at
+the `create` column.
+
+```sql
+create procedure dbo.GetWidgets
+(
+  @minPrice decimal(10, 2)
+, @name     nvarchar(100) = null
+) as
+begin
+    set nocount on;
+end
+```
+
+#### R23b Triggers (`mssql/22-function-trigger-view`)
+
+`on`, `after …` and `as` each on a line 4 in, `begin` at the `create`
+column.
+
+### PostgreSQL (`postgresql`) (`postgresql/01-psql`)
+
+- psql: a line starting with a backslash is a meta-command (`\set`,
+  `\i`, `\copy`, ...); mid-line, `\g`, `\gx`, `\gset`, `\gexec`, `\gdesc`,
+  `\crosstabview` and `\watch` end the statement. `COPY ... FROM STDIN`
+  and `\copy ... from stdin` data, up to the `\.` line, is kept as
+  written. A `;` inside parentheses doesn't end a statement.
+- Dollar-quoted strings (`$$ ... $$`, `$tag$ ... $tag$`), `E'...'`
+  strings and `::` casts are single tokens to the formatter, so a function
+  body in dollar quotes is kept as written.
+- Case: built-in types sqlparser only knows as names (`serial`, `inet`,
+  `point`, the range and object identifier types) are types.
+
+### MySQL (`mysql`) (`mysql/01-delimiter`)
+
+- The mysql client: `delimiter str` changes the statement terminator,
+  which ends a statement wherever it occurs outside strings and comments
+  (`end$$`); `source`, `use`, `charset`, ... first on a line between
+  statements, and the backslash short forms, are client commands; `\g` /
+  `\G` end a statement.
+- `/*! ... */` version comments are comments to the formatter, kept as
+  written. Backtick-quoted identifiers.
+
+### SQLite (`sqlite`) and DuckDB (`duckdb`) (`sqlite/01-dot-commands`, `duckdb/01-dot-commands`)
+
+The sqlite3 shell and the DuckDB CLI (a fork of it): dot-commands at the
+left margin between statements; `#` comment lines.
+
+### Snowflake (`snowflake`) (`snowflake/01-snowsql`)
+
+SnowSQL / Snowflake CLI commands (`!set`, `!source`, ...) first on a line
+between statements.
+
+### Teradata (`teradata`)
+
+BTEQ commands (`.LOGON`, `.SET`, ...) on their own lines between
+statements.
+
+### Other dialects
+
+No client syntax. Statements are formatted one at a time: one that
+doesn't parse is left as written, the others are formatted.
+
+Procedural code other than T-SQL's (PL/pgSQL, MySQL compound statements,
+Snowflake and BigQuery scripting, SQLite trigger bodies: `if … then …
+end if`, `begin … exception … end`, `loop`) shares some AST nodes with
+T-SQL's but not its syntax, so it keeps its source layout; the SQL
+statements inside it are formatted.
+
 ### Open questions
 
 Places where the test bed and the JetBrains scheme (or STYLE.md's own
 baseline text) disagree, or the test bed doesn't settle it; the rule above
 is what's implemented.
 
-- `or` under `where` is 3 in (test bed), not 2 (baseline text above).
+- `and` / `or` under `where` are one indent (4) in; the test bed puts `and`
+  2 in and `or` 3 in (`where.indent = 2`).
 - A CTE's `(` used to depend on how many CTEs there are (DataGrip's output,
   followed by the test bed); since 2026-11-20 it's always 4 in from `with` (R13).
 - A select's first item after a comment goes 4 in from `select`, left of the
@@ -466,3 +568,10 @@ is what's implemented.
   bed has 2 cases, one each way).
 - `merge … on` sits at the `merge` column (40) though 27 statements indent
   it 4.
+- The general rules were written for T-SQL and checked on its test bed;
+  in the other dialects they apply to the same AST constructs unchanged
+  (e.g. R22's parameter block for a PostgreSQL function), with no house
+  style of their own to check them against. A dialect that wants
+  otherwise sets it in its `[dialects.<name>]` section.
+- Procedural code outside T-SQL keeps its source layout (no rules for
+  `if … then … end if` and friends yet).

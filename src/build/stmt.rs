@@ -1,5 +1,16 @@
 //! Statements: dispatch, blocks (`begin … end`, `begin try`, `if`, `while`),
 //! `declare`, `set`, and routine bodies.
+//!
+//! The rules for the statements every dialect shares (queries, DML, DDL,
+//! routine parameter lists, `set`, `declare`) are the same in each. The
+//! procedural rules (STYLE.md R6, R7, the bodies of R22 and R23) are T-SQL's:
+//! its `begin … end` blocks, `if` / `while` without `then`, `as begin …
+//! end` routine bodies and `create trigger … on … after … as`. Other
+//! dialects' procedural code (PL/pgSQL, MySQL compound statements,
+//! Snowflake and BigQuery scripting, SQLite triggers) shares some of those
+//! AST nodes but not their syntax (`if … then … end if`, `begin …
+//! exception … end`, `after update on t`), so it keeps its source layout,
+//! with the SQL statements inside it formatted.
 
 use sqlparser::ast::*;
 use sqlparser::tokenizer::Token;
@@ -14,26 +25,34 @@ impl Builder<'_> {
         self.in_ctx(Ctx::Other, |b| b.statement_inner(s));
     }
 
+    /// Whether the batch is T-SQL (see the module docs).
+    fn tsql(&self) -> bool {
+        self.cfg.dialect_name() == "mssql"
+    }
+
     fn statement_inner(&mut self, s: &Statement) {
         let Some(r) = self.rng(s) else {
             self.generic(s, true);
             return;
         };
         self.src(r);
+        let tsql = self.tsql();
         match s {
             Statement::Query(q) => self.query(q),
             Statement::Insert(i) => self.insert(i, r),
             Statement::Update(u) => self.update(u, r),
             Statement::Delete(d) => self.delete(d, r),
             Statement::Merge(m) => self.merge(m, r),
-            Statement::If(i) => self.if_stmt(i, r),
-            Statement::While(w) => self.while_stmt(w, r),
+            Statement::If(i) if tsql && i.if_block.then_token.is_none() => self.if_stmt(i, r),
+            Statement::While(w) if tsql && w.while_block.then_token.is_none() => {
+                self.while_stmt(w, r)
+            }
             Statement::StartTransaction {
                 statements,
                 has_end_keyword: true,
                 end_token,
                 ..
-            } => {
+            } if tsql => {
                 let end = self.att(end_token);
                 self.block(r.0, statements, end, r);
             }
@@ -42,7 +61,7 @@ impl Builder<'_> {
             }
             Statement::CreateFunction(f) => self.create_function(f, r),
             Statement::CreateView(v) => self.create_view(v, r),
-            Statement::CreateTrigger(t) => self.create_trigger(t, r),
+            Statement::CreateTrigger(t) if tsql => self.create_trigger(t, r),
             Statement::CreateTable(t) => self.create_table(t, r),
             Statement::CreateIndex(i) => self.create_index(i, r),
             Statement::AlterTable(a) => self.alter_table(a, r),
@@ -265,7 +284,7 @@ impl Builder<'_> {
             );
         }
         match body {
-            CreateProcedureBody::As(cs) => self.routine_body(create, cs, r),
+            CreateProcedureBody::As(cs) if self.tsql() => self.routine_body(create, cs, r),
             _ => self.generic(s, true),
         }
     }
@@ -404,7 +423,7 @@ impl Builder<'_> {
             }
         }
         match &f.function_body {
-            Some(CreateFunctionBody::AsBeginEnd(bes)) => {
+            Some(CreateFunctionBody::AsBeginEnd(bes)) if self.tsql() => {
                 let Some(begin) = self.att(&bes.begin_token) else {
                     return;
                 };
