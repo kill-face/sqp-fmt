@@ -13,13 +13,70 @@ exactly as STYLE.md describes: every key's default is today's house style.
   exist), else from the current directory. Editors pass the buffer's path
   this way, as with rustfmt's and prettier's `--stdin-filepath`.
 - `--config FILE` uses FILE and skips the search.
-- The nearest file is the whole configuration: files further up are not
-  merged in.
+- With no file found, the user's `$XDG_CONFIG_HOME/sqp-fmt/sqp-fmt.toml`
+  (`~/.config/sqp-fmt/sqp-fmt.toml`) if it exists, as rustfmt falls back to
+  its global config; else the defaults.
+- The nearest file is the whole configuration: files further up, and the
+  user's file, are not merged in.
 - `SQP_FMT_CEILING_DIRECTORIES` (`:`-separated absolute paths, like Git's
   `GIT_CEILING_DIRECTORIES`) stops the search from going up into those
   directories: neither they nor anything above them is searched.
 - `--write` and `--check` search separately for each file they format.
 - `sqp-fmt corpus` uses `--config FILE` or the defaults; it doesn't search.
+
+## Dialects
+
+A file's dialect is sqlparser's: `generic` (the default: the union of
+sqlparser's grammars), `ansi`, `bigquery`, `clickhouse`, `databricks`,
+`duckdb`, `hive`, `mssql`, `mysql`, `oracle`, `postgresql`, `redshift`,
+`snowflake`, `spark`, `sqlite`, `teradata` (`postgres` and `sparksql` are
+accepted for `postgresql` and `spark`). It is, in order:
+
+1. `--dialect NAME` on the command line;
+2. the most specific `[[dialect_paths]]` entry that is the file or a
+   directory above it (on a tie, the later entry): JetBrains' SQL dialect
+   mappings. `path` is a file or directory, `~/` expanded, a relative path
+   relative to the configuration file's directory;
+3. the configuration's `dialect`;
+4. `generic`.
+
+The dialect selects:
+
+- the tokenizer and grammar, for parsing and for the safety net;
+- the client syntax kept as written (STYLE.md, "Dialect rules"): sqlcmd's
+  `GO` and `:` commands for `mssql`, the mysql client's `delimiter` and
+  commands for `mysql`, psql's meta-commands and `COPY` data for
+  `postgresql`, dot-commands for `sqlite` and `duckdb`, `!` commands for
+  `snowflake`, BTEQ commands for `teradata`; none for `generic` and the
+  others;
+- whether a batch is parsed as a whole (sqlcmd's `GO` batches) or
+  statement by statement (every other client sends one statement at a
+  time, so one that doesn't parse leaves only itself as written);
+- T-SQL's procedural rules and case lists, for `mssql` only;
+- the `[dialects.<name>]` section layered over the general style.
+
+`[dialects.<name>]` holds any style key (not `dialect`, `dialects` or
+`dialect_paths`). For a file of that dialect its keys replace the general
+ones key by key, the way each JetBrains SQL dialect inherits the General
+code style unless it overrides a setting:
+
+```toml
+dialect = "postgresql"
+keyword_case = "lower"
+
+[[dialect_paths]]
+path = "legacy/"
+dialect = "mssql"
+
+[[dialect_paths]]
+path = "~/code/scripts/report.sql"
+dialect = "mysql"
+
+# Files of dialect mssql: upper-case keywords, and where's `and` 2 in.
+[dialects.mssql]
+keyword_case = "upper"
+where.indent = 2
+```
 
 A configuration error stops sqp-fmt before it writes anything (exit code 2)
 with a message that points at the key:
@@ -51,7 +108,7 @@ is the scheme sqp-fmt's house style starts from).
 | `"always"` | Wrap always / Chop always | Every element on a line of its own. |
 
 For a parenthesised construct, "chopped" means the **block** layout
-sqp-fmt already has: `(` ends its line, the contents are indented 2 from the
+sqp-fmt already has: `(` ends its line, the contents are indented one level from the
 `(` column, `)` is on its own line under the `(`. That one layout stands for
 JetBrains' separate "new line after `(`", "place `)` on new line" and
 "align when multiline" options, which sqp-fmt doesn't split up (yet).
@@ -86,7 +143,7 @@ This file is the defaults: formatting with it is the same as formatting
 without it.
 
 ```toml
-dialect = "mssql"
+dialect = "generic"
 margin = 120
 indent = 4
 keyword_case = "lower"
@@ -294,7 +351,9 @@ What each key accepts today. Any other value of a known key is rejected with
 
 | Key | Implemented | Default |
 |---|---|---|
-| `dialect` | `mssql`, `ansi`, `bigquery`, `clickhouse`, `databricks`, `duckdb`, `generic`, `hive`, `mysql`, `oracle`, `postgresql`, `redshift`, `snowflake`, `spark`, `sqlite`, `teradata` | `mssql` |
+| `dialect` | `generic`, `ansi`, `bigquery`, `clickhouse`, `databricks`, `duckdb`, `hive`, `mssql`, `mysql`, `oracle`, `postgresql`, `redshift`, `snowflake`, `spark`, `sqlite`, `teradata` (and `postgres`, `sparksql`) | `generic` |
+| `[[dialect_paths]]` `path`, `dialect` | a file or directory; a dialect | none |
+| `[dialects.<name>]` | any style key, for files of dialect `<name>` | none |
 | `margin` | 20 to 1000 | 120 |
 | `indent` | 1 to 16 | 4 |
 | `keyword_case`, `function_case`, `type_case` | `lower`, `upper`, `as_is` | `lower` |
@@ -340,12 +399,14 @@ What each key accepts today. Any other value of a known key is rejected with
 | `routine_params.comma` | `leading`, `trailing` | `leading` |
 | `routine_params.align_types` | `true`, `false` | `true` |
 
-Every implemented non-default value has a golden test in `tests/golden/`
+Every implemented non-default value has a golden test in `tests/golden/mssql/`
 (`NN-name.sql` with its `NN-name.toml`, formatted to
 `NN-name.expected.sql`): 30 to 34 conditions, 35 to 39 windows, 40 to 42
 query lists, 43 to 45 parenthesised lists and `exec`, 46 to 48 `values` and
 `insert`, 49 to 51 `case`, 52 subqueries / CTEs / `merge`, 53 to 55 DDL, 56
-and 57 the globals and case, 58 the dialect.
+and 57 the globals and case; `postgresql/58-dialect` the dialect,
+`postgresql/02-case` and `mysql/02-case` the case keys with the AST's
+classes in other dialects.
 
 ## Reference
 
@@ -364,12 +425,11 @@ defaults.
 | `function_case` | `lower`, `upper`, `as_is` | Case: built-in functions (Database Navigator's `FUNCTION_CASE`) |
 | `type_case` | `lower`, `upper`, `as_is` | Case: Built-in types (`TYPE_CASE`) |
 
-`dialect` selects the sqlparser dialect for parsing and for the safety net's
-re-tokenizing. The layout rules are written for T-SQL (and `GO` batches,
-SQLCMD lines and `[quoted]` identifiers are T-SQL's); with another dialect
-whatever doesn't parse, or wouldn't come back with the same tokens, is left
-exactly as written, so nothing breaks, but the result may look odd (with
-`postgresql`, `[a]` is an array subscript and gets a space: `[ a]`).
+`dialect` selects the file's dialect (see [Dialects](#dialects)): the
+tokenizer and grammar, the client syntax, and the `[dialects.<name>]`
+section. The general rules are the same in every dialect; whatever doesn't
+parse, or wouldn't come back with the same tokens, is left exactly as
+written, so nothing breaks.
 
 `indent` is one level: statement blocks (`begin … end`, `if` bodies),
 clause continuation lines (a join's `on`, `create index … on`, `alter table`
@@ -380,14 +440,15 @@ columns and `merge` actions. It is also the default of every construct's own
 offset of chopped parenthesised lists. Leading commas stay 2 left of their
 items.
 
-The case keys apply to what `case.rs` already re-cases: keywords (and date
-parts in `dateadd`-style functions), built-in function names (and `@@`
-functions, `cast` / `convert`), system type names. Identifiers are never
-touched. A word is classed by the AST where it's an identifier (a function
-name, a type name); otherwise by name and position: a system type name is a
-type (`table` only after a `@variable`, `xml` not after `for`), a built-in
-function name right before `(` is a function (not `identity (1,1)`), other
-keywords are keywords.
+The case keys apply to what the AST marks (STYLE.md R1): keywords
+(`keyword_case`; T-SQL date parts in `dateadd`-style functions too), the
+names of unqualified function calls and of the functions with a syntax of
+their own (`cast`, `convert`, `extract`, ...; T-SQL `@@` functions)
+(`function_case`), and data type names (`type_case`). Identifiers are
+never touched: a qualified function name (`dbo.fnTotal`) and a
+user-defined type keep their case. Built-in types the parser only knows as
+names are on a per-dialect list (T-SQL's `sysname`, `datetime2`, ...;
+PostgreSQL's `serial`, `inet`, ...).
 
 ```sql
 -- before

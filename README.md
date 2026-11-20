@@ -1,48 +1,72 @@
 # sqp-fmt
 
-A T-SQL formatter that only changes whitespace and case, built on a fork of
-[sqlparser-rs](https://github.com/apache/datafusion-sqlparser-rs). The target
-style is in [STYLE.md](STYLE.md).
+A SQL formatter for every dialect
+[sqlparser-rs](https://github.com/apache/datafusion-sqlparser-rs) parses
+(through a fork, sqp-rs). It only changes whitespace and keyword case:
+a safety net tokenizes each batch's output again and compares it with the
+input, and leaves the batch exactly as written on any difference. A file
+is read the way its dialect's command-line client reads it (sqlcmd's `GO`,
+the mysql client's `DELIMITER`, psql's meta-commands, the sqlite3 shell's
+dot-commands, ...), and those are kept as written. The style, a general
+one with a section per dialect, is in [STYLE.md](STYLE.md); every setting
+is in [docs/config.md](docs/config.md).
 
 ## Layout
 
 - `../sqp-rs`: the parser fork (`origin` =
-  [`kill-face/sqp-rs`](https://github.com/kill-face/sqp-rs), `upstream` = `apache/...`), worked on
-  under the `tsql` bookmark. Each grammar fix is its own change with tests, so
-  it can go upstream.
-- `src/lib.rs`: splits a file into `GO` batches (SQLCMD `:r` / `:setvar`
-  lines are skipped), keeping file line numbers, and parses each batch with
-  the MS SQL dialect, keeping comments.
-- `src/format.rs`: formats a file: line endings and BOM, `GO` / SQLCMD lines
-  (kept as written), `@formatter:off` regions, one batch at a time; and the
-  safety net (below).
+  [`kill-face/sqp-rs`](https://github.com/kill-face/sqp-rs), `upstream` =
+  `apache/datafusion-sqlparser-rs`), integrating on its `main` bookmark.
+  Each grammar or span fix is its own change with tests, so it can go
+  upstream. `Cargo.toml` depends on it by path; the Nix package
+  (`flake.nix`) builds against its GitHub `main` instead.
+- `src/script.rs`: the script layer. A file split into SQL, client
+  commands and client data for its dialect's client, from each client's
+  documentation (sqlcmd, mysql, psql, sqlite3 / DuckDB, SnowSQL, BTEQ;
+  `generic` has none), and the lexing of SQL with sqlparser's tokenizer for
+  the dialect (with the mysql client's delimiter and psql's `\g`-style
+  terminators): the one source of lexical truth.
+- `src/lib.rs`: the batches of a file and their parse (`check`, `spans`).
+- `src/format.rs`: formats a file: line endings and BOM, the script's
+  parts, `@formatter:off` regions, one batch at a time; parsing (a sqlcmd
+  batch as a whole, else statement by statement); and the safety net
+  (below).
 - `src/layout.rs`: the layout model and printer. A batch is its tokens, the
   trivia (comments, line breaks) between them, and a rule per gap between two
   tokens (keep the source's line break / one line / break / break with a
   group / fill to the margin), with indents relative to tokens printed
   earlier and alignment columns. The printer only ever writes whitespace
-  between the tokens, so it can't drop or reorder anything.
+  between the tokens, so it can't drop or reorder anything, and it keeps
+  two tokens apart that written together would read as other tokens.
 - `src/build/`: sets the rules from the AST (`stmt.rs` statements and
   blocks, `query.rs` queries, `expr.rs` expressions, `dml.rs`, `ddl.rs`).
   Every gap starts as "keep the source layout, re-indented with its
   surroundings"; handlers replace that for the constructs they know, so
-  anything unknown keeps its layout.
-- `src/case.rs`: keyword / built-in function / system type case, deciding
-  identifiers by the AST.
+  anything unknown keeps its layout. Shared constructs get the same rules
+  in every dialect; T-SQL's procedural syntax has rules of its own.
+- `src/case.rs`: keyword / function / type case, each word classed by the
+  AST (identifiers, function calls, data types), with per-dialect lists
+  only for what the AST can't tell.
 - `src/config.rs`: the configuration file (`sqp-fmt.toml`): the schema (one
-  struct per section, defaults = STYLE.md), discovery, loading, and the
-  table of implemented values (anything else is rejected); `docs/config.md`
-  is its reference.
-- `src/corpus.rs`: the `corpus` progress measure.
+  struct per section, defaults = STYLE.md), `[dialects.<name>]` layering,
+  `[[dialect_paths]]`, discovery (upward search, user config), loading,
+  and the table of implemented values (anything else is rejected);
+  `docs/config.md` is its reference.
+- `src/corpus.rs`: the `corpus` progress measure, also over sqlfluff's
+  dialect fixtures.
 - `src/main.rs`: the `sqp-fmt` command.
+- `docs/sqlparser-field-guide.html`: the parser's architecture and how
+  sqp-fmt uses it.
 
 ## Formatting
 
-`sqp-fmt [--config FILE] [--stdin-filepath PATH] [FILE | -]` formats FILE
-(or stdin) to stdout. The layout comes from the first `sqp-fmt.toml` in
-FILE's directory or above it (for stdin: above `--stdin-filepath`'s
-directory, else the current one), or `--config FILE`; with none, the house
-style of [STYLE.md](STYLE.md). [docs/config.md](docs/config.md) has every
+`sqp-fmt [--config FILE] [--dialect NAME] [--stdin-filepath PATH] [FILE | -]`
+formats FILE (or stdin) to stdout. The layout comes from the first
+`sqp-fmt.toml` in FILE's directory or above it (for stdin: above
+`--stdin-filepath`'s directory, else the current one), or `--config FILE`,
+else `$XDG_CONFIG_HOME/sqp-fmt/sqp-fmt.toml`; with none, the house style
+of [STYLE.md](STYLE.md). The dialect is `--dialect`, else the
+configuration's `[[dialect_paths]]` entry for the file, else its
+`dialect`, else `generic`. [docs/config.md](docs/config.md) has every
 key. A bad configuration is an error (exit code 2, the message on stderr
 points at the key, nothing on stdout).
 
@@ -79,11 +103,13 @@ require("conform").setup({
 })
 ```
 
-Safety: each batch's output is tokenized again and compared with the
-input's tokens, comments included; only whitespace may differ, and case only
-for the words the formatter re-cased. If they differ, or formatting
-panics, that batch is emitted exactly as written. Batches that don't parse,
-`@formatter:off` … `@formatter:on` lines, `GO` lines and SQLCMD lines are
+Safety: each batch's output is tokenized again, with the dialect's
+tokenizer and client, and compared with the input's tokens, comments
+included; only whitespace may differ, and case only for the words the
+formatter re-cased, and no output line may read as a client command. If
+they differ, or formatting panics, that batch is emitted exactly as
+written. Statements that don't parse (sqlcmd: batches),
+`@formatter:off` … `@formatter:on` lines and client commands and data are
 left as written too. CRLF / LF, a BOM and a missing final newline are kept
 (a file with mixed line endings is only formatted if every `\r` is inside a
 comment or string, else left alone).
@@ -92,15 +118,22 @@ comment or string, else left alone).
 
 ```sh
 nix develop                      # or direnv
-cargo run --release -- corpus corpus/private/          # format the test bed in memory: lines unchanged, fallbacks, idempotency
-cargo run --release -- corpus --list corpus/private/   # ... with every changed file
-cargo run --release -- corpus --diff FILE              # unified diff of what formatting FILE changes
-cargo test                                             # golden tests (tests/golden), token and idempotency checks
-cargo run --release -- check corpus/private/           # parse rate + grouped errors
-cargo run --release -- check --files corpus/private/   # ... plus every failing file
-cargo run --release -- spans corpus/private/           # AST span audit, grouped findings
-cargo run --release -- spans --details corpus/private/ # ... with every location
+nix build                        # the package, tests included
+cargo run --release -- corpus --dialect mssql corpus/private/     # format the test bed in memory: lines unchanged, fallbacks, idempotency
+cargo run --release -- corpus --list corpus/private/              # ... with every changed file
+cargo run --release -- corpus --diff FILE                         # unified diff of what formatting FILE changes
+cargo run --release -- corpus --sqlfluff corpus/sqlfluff/         # sqlfluff's fixtures, a table per dialect
+cargo run --release -- corpus --sqlfluff --errors 5 corpus/sqlfluff/  # ... with each dialect's most common parser errors
+cargo test                                                        # golden tests (tests/golden), token and idempotency checks
+cargo run --release -- check --dialect mssql corpus/private/      # parse rate + grouped errors
+cargo run --release -- check --files corpus/private/              # ... plus every failing statement
+cargo run --release -- spans --dialect mssql corpus/private/      # AST span audit, grouped findings
+cargo run --release -- spans --details corpus/private/            # ... with every location
 ```
+
+`corpus/sqlfluff/` is sqlfluff's `test/fixtures/dialects` (`*.sql` only,
+MIT, see `corpus/sqlfluff/SOURCE`), git-ignored like all of `corpus/`:
+never commit corpus SQL. `cargo test` needs nothing outside the repo.
 
 `spans` checks, for every batch that parses, that the AST's source spans are
 complete enough to map every token back to its node (see `src/spans.rs`):
@@ -117,13 +150,17 @@ ends with a different token.
 unchanged, the batches the safety net left as written (should be 0), the
 files where formatting twice differs from formatting once (should be 0), the
 slowest file and the files with the biggest diffs. Golden tests: each
-`tests/golden/NAME.sql` must format to `NAME.expected.sql`, with
+`tests/golden/DIALECT/NAME.sql` must format to `NAME.expected.sql` as
+DIALECT (the directory maps its files to the dialect), with
 `NAME.toml` as its configuration if there is one, else the defaults
 (`SQP_FMT_BLESS=1 cargo test` rewrites the expected files; review the
 diff). `tests/cli.rs` tests the command: finding `sqp-fmt.toml`, `--config`,
-`--stdin-filepath`, configuration errors.
+`--stdin-filepath`, the user config, dialects, `--write` / `--check`,
+`corpus --sqlfluff`, configuration errors.
 
 ## Status
+
+The private T-SQL corpus (`corpus/private/`, 510 files; `--dialect mssql`):
 
 | Date | corpus files parsing |
 |---|---|
@@ -155,6 +192,7 @@ last column leaves it out.
 | 2026-11-19 | 417 / 510 | 51995 / 65365 (79.55%) | 0 | 0 | 51956 / 52653 (98.68%) | Configuration file (`sqp-fmt.toml`, docs/config.md); no file = the same output as before, byte for byte. A window or group written over several lines now breaks the list or `case` around it (none in the test bed) |
 | 2026-11-20 | 416 / 510 | 51503 / 65365 (78.79%) | 0 | 0 | 51464 / 52653 (97.74%) | A CTE's `(` 4 in from `with` also when there's one CTE (was: from its name, as DataGrip does); `where.indent` / `having.indent` and `join_on.indent`. The ~490 lines more that change are single-CTE queries moving left |
 | 2026-11-20 | 407 / 510 | 51138 / 65365 (78.23%) | 0 | 0 | 51099 / 52653 (97.05%) | Every offset defaults to `indent` (4); `and exists (`: the `(` 4 in from its `and`: `where` / `having` `and` (was 2), logical-block and window contents (was 2), procedure parameters (was 2), chopped parenthesised lists (was 2); each has its own `indent` key (`<condition>.groups.indent`, `window.indent`, `routine_params.indent`). The corpus mostly uses +2, hence the drop |
+| 2026-11-20 | 407 / 510 | 51138 / 65365 (78.23%) | 0 | 0 | 51099 / 52653 (97.05%) | Every dialect: the script layer (each client's syntax kept as written, sqlparser's tokenizer as the one lexer, statement-by-statement parsing outside sqlcmd), case from the AST, T-SQL's procedural rules only for T-SQL, `corpus --sqlfluff`. The output is byte for byte the same as before |
 
 sqlfluff's dialect fixtures (`sqp-fmt corpus --sqlfluff corpus/sqlfluff`,
 sqlfluff 4.5.0, 2026-11-20; each sqlfluff dialect formatted as the
@@ -204,6 +242,26 @@ SQL in postgres) went with `Layout::apart` and the script layer.
 
 ## Decisions
 
-- Block indentation: contents at the `(` column + 2, `)` under the `(`
-  (STYLE.md, change 1). Decided 2026-11-19.
-- The fork stays local for now; nothing is pushed to GitHub.
+- Block indentation: contents one indent (4) in from the `(` column, `)`
+  under the `(` (STYLE.md, change 1; 2 in until 2026-11-20, when every
+  offset became `indent`).
+- The fork is pushed to `kill-face/sqp-rs`; its `main` bookmark is what
+  sqp-fmt integrates on, and what the Nix package builds against.
+- 2026-11-20, every dialect:
+  - The dialect defaults to `generic`, which recognises no client syntax:
+    the clients conflict (`GO` and `DELIMITER` are words elsewhere, `\`,
+    `.` and `!` mean different things to different clients), as sqlfluff's
+    ansi and JetBrains' Generic SQL recognise none.
+  - Client syntax per dialect from the client's documentation: sqlcmd
+    (mssql), mysql, psql (postgresql), the sqlite3 shell (sqlite; and
+    duckdb, whose CLI forks it), SnowSQL (snowflake), BTEQ (teradata).
+  - sqlcmd sends a `GO` batch whole, so a T-SQL batch parses as a whole
+    or is left as written; every other client sends one statement at a
+    time, so there a statement must end at the client's terminator, and
+    one that doesn't parse leaves only itself as written.
+  - Case: function and type names from the AST; an unqualified function
+    call is a function name even if user-defined (as sqlfluff's
+    capitalisation.functions does), a qualified one stays as written.
+  - The general rules apply to every dialect's shared constructs
+    unchanged (a PostgreSQL function's parameters get R22's block);
+    procedural code outside T-SQL keeps its source layout.
