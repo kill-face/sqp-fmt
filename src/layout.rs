@@ -192,6 +192,10 @@ pub struct Layout {
     pub trivia: Vec<Trivia>,
     /// Whether the source had a space or tab right before `toks[i]`.
     pub src_space: Vec<bool>,
+    /// Whether `toks[i - 1]` and `toks[i]`, written apart in the source,
+    /// would read as other tokens written together (`- -` as `--`, `a b` as
+    /// `ab`): then they stay apart whatever the rule says.
+    pub apart: Vec<bool>,
     /// `gaps[i]` is the gap before `toks[i]` (`gaps[0]` is unused).
     pub gaps: Vec<Gap>,
     pub groups: Vec<Group>,
@@ -232,6 +236,39 @@ pub fn default_space(prev: &Tok, next: &Tok, src: bool) -> bool {
         (DoubleColon, _) | (_, DoubleColon) => false,
         _ => src,
     }
+}
+
+/// Whether the rule of the gap before `toks[i]` may print it without a
+/// space.
+pub fn may_join(l: &Layout, i: usize) -> bool {
+    let no = |sp: Sp| match sp {
+        Sp::No => true,
+        Sp::One | Sp::Asis => false,
+        Sp::Src => !default_space(&l.toks[i - 1], &l.toks[i], true),
+    };
+    match l.gaps[i].rule {
+        Rule::Src => no(Sp::Src),
+        Rule::Break(_) => false,
+        Rule::Flat(sp)
+        | Rule::BreakIf(_, _, sp)
+        | Rule::Keep(_, sp)
+        | Rule::FlatIn(_, sp)
+        | Rule::Fill(_, _, sp) => no(sp),
+        Rule::SpaceIf(_, a, b) => no(a) || no(b),
+    }
+}
+
+/// Whether the gap before `toks[i]`, printed flat with spacing `sp`, gets a
+/// space.
+fn space(l: &Layout, i: usize, sp: Sp, prev: &Tok, next: &Tok) -> bool {
+    let had = l.trivia[i].had_space(l.src_space[i]);
+    let sp = match sp {
+        Sp::No => false,
+        Sp::One => true,
+        Sp::Src => default_space(prev, next, had),
+        Sp::Asis => had,
+    };
+    sp || l.apart.get(i).copied().unwrap_or(false)
 }
 
 /// Prints a layout. Returns the output lines.
@@ -440,14 +477,7 @@ impl Printer<'_> {
         let gap = &l.gaps[i];
         let nl = l.trivia[i].newlines() > 0;
         let (prev, next) = (&l.toks[i - 1], &l.toks[i]);
-        let flat = |sp: Sp| {
-            Decision::Flat(match sp {
-                Sp::No => false,
-                Sp::One => true,
-                Sp::Src => default_space(prev, next, l.trivia[i].had_space(l.src_space[i])),
-                Sp::Asis => l.trivia[i].had_space(l.src_space[i]),
-            })
-        };
+        let flat = |sp: Sp| Decision::Flat(space(l, i, sp, prev, next));
         match gap.rule {
             Rule::Src => {
                 if nl {
@@ -836,16 +866,7 @@ impl Printer<'_> {
                 }
             }
         };
-        let mut w = match sp {
-            Sp::No => 0,
-            Sp::One => 1,
-            Sp::Src => usize::from(default_space(
-                &l.toks[i - 1],
-                &l.toks[i],
-                tr.had_space(l.src_space[i]),
-            )),
-            Sp::Asis => usize::from(tr.had_space(l.src_space[i])),
-        };
+        let mut w = usize::from(space(l, i, sp, &l.toks[i - 1], &l.toks[i]));
         for item in &tr.items {
             if let TriviaItem::Comment { text, .. } = item {
                 w += 1 + text.chars().count();

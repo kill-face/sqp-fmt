@@ -24,12 +24,13 @@ use std::fmt::{self, Debug, Write as _};
 use std::ops::ControlFlow;
 
 use sqlparser::ast::*;
-use sqlparser::dialect::MsSqlDialect;
+use sqlparser::dialect::Dialect;
 use sqlparser::keywords::Keyword;
-use sqlparser::parser::{Parser, ParserError, ParserOptions};
+use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Location, Span, Token, TokenWithSpan, Tokenizer};
 
-use crate::Batch;
+use crate::script::Client;
+use crate::{Batch, Config};
 
 /// One problem with one node's span.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +106,7 @@ fn variant<T: Debug + ?Sized>(v: &T) -> String {
 /// comparable to the source: it isn't for nodes with a query or statement
 /// inside, whose `Display` adds `AS`, `;`, ...
 fn display_tokens<T: Visit + fmt::Display>(
+    dialect: &dyn Dialect,
     node: &T,
     is_statement: bool,
 ) -> Option<(Vec<Token>, bool)> {
@@ -126,7 +128,7 @@ fn display_tokens<T: Visit + fmt::Display>(
     let mut nested = Nested(usize::from(!is_statement));
     let countable = !node.visit(&mut nested).is_break();
     let text = node.to_string();
-    let toks = Tokenizer::new(&MsSqlDialect {}, &text).tokenize().ok()?;
+    let toks = Tokenizer::new(dialect, &text).tokenize().ok()?;
     let toks = toks
         .into_iter()
         .filter(|t| !matches!(t, Token::Whitespace(_) | Token::EOF | Token::SemiColon))
@@ -147,17 +149,6 @@ fn contains(outer: Span, inner: Span) -> bool {
 struct Tokens(Vec<TokenWithSpan>);
 
 impl Tokens {
-    fn new(text: &str) -> Result<Self, ParserError> {
-        let toks = Tokenizer::new(&MsSqlDialect {}, text)
-            .tokenize_with_location()
-            .map_err(|e| ParserError::TokenizerError(e.to_string()))?;
-        Ok(Tokens(
-            toks.into_iter()
-                .filter(|t| !matches!(t.token, Token::Whitespace(_) | Token::EOF))
-                .collect(),
-        ))
-    }
-
     fn starting_at(&self, loc: Location) -> Option<usize> {
         let i = self.0.partition_point(|t| t.span.start < loc);
         (self.0.get(i)?.span.start == loc).then_some(i)
@@ -209,35 +200,54 @@ fn is_keyword(t: Option<&TokenWithSpan>, kw: Keyword) -> bool {
     matches!(t, Some(TokenWithSpan { token: Token::Word(w), .. }) if w.keyword == kw)
 }
 
-/// Parse a batch one statement at a time, the way `parse_batch` does, also
-/// returning where each statement's tokens start and end.
-fn parse_with_extents(batch: &Batch) -> Result<Vec<(Statement, Span)>, ParserError> {
-    let options = ParserOptions {
-        require_semicolon_stmt_delimiter: false,
-        ..ParserOptions::default()
-    };
-    let dialect = MsSqlDialect {};
-    let mut parser = Parser::new(&dialect)
-        .with_options(options)
-        .try_with_sql(&batch.text)?;
+/// Parse a batch's tokens one statement at a time, the way the formatter
+/// does, also returning where each statement's tokens start and end.
+fn parse_with_extents(
+    toks: Vec<TokenWithSpan>,
+    dialect: &dyn Dialect,
+    client: Client,
+) -> Result<Vec<(Statement, Span)>, ParserError> {
+    let mut parser = Parser::new(dialect)
+        .with_options(crate::format::options(client))
+        .with_tokens_with_locations(toks);
     let mut out = Vec::new();
+    let mut expecting_delimiter = false;
     loop {
-        while parser.consume_token(&Token::SemiColon) {}
+        while parser.consume_token(&Token::SemiColon) {
+            expecting_delimiter = false;
+        }
         if parser.peek_token_ref().token == Token::EOF {
             break;
+        }
+        if expecting_delimiter && client.sends_statements() {
+            return parser.expected_ref("end of statement", parser.peek_token_ref());
         }
         let start = parser.peek_token_ref().span.start;
         let stmt = parser.parse_statement()?;
         let end = parser.get_current_token().span.end;
         out.push((stmt, Span::new(start, end)));
+        expecting_delimiter = true;
     }
     Ok(out)
 }
 
 /// Audit one batch, adding to `audit`. Fails if the batch doesn't parse.
-pub fn audit_batch(batch: &Batch, audit: &mut Audit) -> Result<(), ParserError> {
-    let stmts = parse_with_extents(batch)?;
-    let toks = Tokens::new(&batch.text)?;
+pub fn audit_batch(batch: &Batch, cfg: &Config, audit: &mut Audit) -> Result<(), ParserError> {
+    let lx = crate::lex_batch(batch, cfg);
+    if let Some(e) = lx.error {
+        return Err(ParserError::TokenizerError(e.to_string()));
+    }
+    let dialect = cfg.dialect();
+    let dialect = dialect.as_ref();
+    let client = Client::of(cfg.dialect_name());
+    let toks = Tokens(
+        lx.toks
+            .iter()
+            .filter(|t| !matches!(t.token, Token::Whitespace(_) | Token::EOF))
+            .cloned()
+            .collect(),
+    );
+    let stmts = parse_with_extents(lx.toks, dialect, client)?;
 
     // 1. Top level.
     let mut spans = Vec::new();
@@ -296,6 +306,7 @@ pub fn audit_batch(batch: &Batch, audit: &mut Audit) -> Result<(), ParserError> 
     // 2. and 3. Nested nodes and lists.
     for (stmt, _) in &stmts {
         let mut walker = Walker {
+            dialect,
             toks: &toks,
             audit,
             stack: Vec::new(),
@@ -306,6 +317,7 @@ pub fn audit_batch(batch: &Batch, audit: &mut Audit) -> Result<(), ParserError> 
 }
 
 struct Walker<'a> {
+    dialect: &'a dyn Dialect,
     toks: &'a Tokens,
     audit: &'a mut Audit,
     /// Enclosing checked nodes: kind and span.
@@ -360,7 +372,7 @@ impl Walker<'_> {
         if span == Span::empty() {
             return;
         }
-        let Some((shown, countable)) = display_tokens(node, is_statement) else {
+        let Some((shown, countable)) = display_tokens(self.dialect, node, is_statement) else {
             return;
         };
         let own: Vec<&TokenWithSpan> = self
@@ -838,8 +850,9 @@ mod tests {
 
     fn audit(sql: &str) -> Audit {
         let mut audit = Audit::default();
-        for batch in split_batches(sql) {
-            audit_batch(&batch, &mut audit).unwrap();
+        let cfg = Config::default().for_dialect("mssql");
+        for batch in split_batches(sql, &cfg) {
+            audit_batch(&batch, &cfg, &mut audit).unwrap();
         }
         audit
     }

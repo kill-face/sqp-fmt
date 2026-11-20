@@ -127,6 +127,8 @@ pub fn run(args: &[String]) -> ExitCode {
         }
         total.batches += stats.batches;
         total.formatted += stats.formatted;
+        total.partial += stats.partial;
+        total.unparsed_statements += stats.unparsed_statements;
         total.unparsed += stats.unparsed;
         total.mismatches += stats.mismatches;
         total.errors += stats.errors;
@@ -146,8 +148,13 @@ pub fn run(args: &[String]) -> ExitCode {
         pct(unchanged_lines, lines)
     );
     println!(
-        "{} batches: {} formatted, {} left as written (don't parse), {} in @formatter:off regions",
-        total.batches, total.formatted, total.unparsed, total.off
+        "{} batches: {} formatted, {} partly formatted ({} statements left as written), {} left as written (don't parse), {} in @formatter:off regions",
+        total.batches,
+        total.formatted,
+        total.partial,
+        total.unparsed_statements,
+        total.unparsed,
+        total.off
     );
     println!(
         "safety fallbacks: {} token mismatches, {} internal errors; {} files not idempotent",

@@ -1,4 +1,4 @@
-//! `sqp-fmt check <path>...`: parse every .sql file under the paths and
+//! `sqp-fmt check [--dialect NAME] <path>...`: parse every .sql file under the paths and
 //! report which fail, grouped by parser error. This is the progress measure
 //! for the grammar work in the sqlparser-rs fork.
 //!
@@ -21,8 +21,8 @@ pub(crate) fn usage() -> ExitCode {
          print the files formatting would change; exit 1 if any, 2 on errors\n       \
          sqp-fmt corpus [--config FILE] [--dialect NAME] [--diff FILE] [--top N] <path>...\n       \
          sqp-fmt corpus --sqlfluff [--config FILE] <dir>\n       \
-         sqp-fmt check [--dialect NAME] [--files] <path>...\n       \
-         sqp-fmt spans [--dialect NAME] [--details] <path>..."
+         sqp-fmt check [--config FILE] [--dialect NAME] [--files] <path>...\n       \
+         sqp-fmt spans [--config FILE] [--dialect NAME] [--details] <path>..."
     );
     ExitCode::from(2)
 }
@@ -57,22 +57,84 @@ pub(crate) fn collect(path: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn check(args: &[String]) -> ExitCode {
-    let list_files = args.iter().any(|a| a == "--files");
-    let roots: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
+/// The options `check` and `spans` share: `--config FILE`, `--dialect
+/// NAME`, other flags, and the files under the paths; the exit code after
+/// printing the usage or an error.
+struct Inputs {
+    cfg: sqp_fmt::Config,
+    dialect: Option<String>,
+    flags: Vec<String>,
+    files: Vec<PathBuf>,
+}
+
+fn inputs(args: &[String]) -> Result<Inputs, ExitCode> {
+    let mut cfg = sqp_fmt::Config::default();
+    let (mut dialect, mut flags, mut roots) = (None, Vec::new(), Vec::new());
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--config" => match it.next().map(|p| sqp_fmt::Config::load(Path::new(p))) {
+                Some(Ok(c)) => cfg = c,
+                Some(Err(e)) => {
+                    eprintln!("sqp-fmt: {e}");
+                    return Err(ExitCode::from(2));
+                }
+                None => return Err(usage()),
+            },
+            "--dialect" => match it.next() {
+                Some(d) => dialect = Some(d.clone()),
+                None => return Err(usage()),
+            },
+            _ if a.starts_with("--") => flags.push(a.clone()),
+            _ => roots.push(a.clone()),
+        }
+    }
     if roots.is_empty() {
-        return usage();
+        return Err(usage());
     }
     let mut files = Vec::new();
     for r in roots {
-        collect(Path::new(r), &mut files);
+        collect(Path::new(&r), &mut files);
     }
+    Ok(Inputs {
+        cfg,
+        dialect,
+        flags,
+        files,
+    })
+}
+
+impl Inputs {
+    /// The configuration for `file`'s dialect.
+    fn config_for(&self, file: &Path) -> Option<sqp_fmt::Config> {
+        let d = resolve_dialect(self.dialect.as_deref(), &self.cfg, Some(file))?;
+        Some(self.cfg.for_dialect(d))
+    }
+}
+
+/// `sqp-fmt check [--config FILE] [--dialect NAME] [--files] <path>...`:
+/// parse every .sql file (each batch the way the formatter does: for the
+/// clients that send statements one at a time, statement by statement) and
+/// report the files that parse, and the statements (sqlcmd: batches) that
+/// don't, grouped by parser error.
+fn check(args: &[String]) -> ExitCode {
+    let inp = match inputs(args) {
+        Ok(i) => i,
+        Err(code) => return code,
+    };
+    if let Some(f) = inp.flags.iter().find(|f| *f != "--files") {
+        eprintln!("sqp-fmt: check: unknown option {f}");
+        return usage();
+    }
+    let list_files = !inp.flags.is_empty();
+    let files = &inp.files;
 
     let mut ok = 0;
+    let mut failures = 0;
     // error message (without position) -> (count, example "file:line:col")
     let mut groups: BTreeMap<String, (usize, String)> = BTreeMap::new();
     let mut failed = Vec::new();
-    for file in &files {
+    for file in files {
         let src = match std::fs::read_to_string(file) {
             Ok(s) => s,
             Err(e) => {
@@ -80,26 +142,30 @@ fn check(args: &[String]) -> ExitCode {
                 continue;
             }
         };
-        let err = sqp_fmt::split_batches(&src)
-            .iter()
-            .find_map(|b| sqp_fmt::parse_batch(b).err());
-        match err {
-            None => ok += 1,
-            Some(e) => {
-                let msg = e.to_string();
-                let (key, pos) = match msg.split_once(" at Line: ") {
-                    Some((k, p)) => (k.to_string(), p.replace(", Column: ", ":")),
-                    None => (msg.clone(), String::new()),
-                };
-                let example = format!("{}:{pos}", file.display());
-                groups.entry(key).or_insert((0, example.clone())).0 += 1;
-                failed.push(example);
-            }
+        let Some(cfg) = inp.config_for(file) else {
+            return ExitCode::from(2);
+        };
+        let mut errors = Vec::new();
+        for b in sqp_fmt::split_batches(&src, &cfg) {
+            errors.extend(sqp_fmt::parse_batch(&b, &cfg).1);
+        }
+        if errors.is_empty() {
+            ok += 1;
+        }
+        for (line, msg) in errors {
+            failures += 1;
+            let (key, pos) = match msg.split_once(" at Line: ") {
+                Some((k, p)) => (k.to_string(), p.replace(", Column: ", ":")),
+                None => (msg.clone(), line.to_string()),
+            };
+            let example = format!("{}:{pos}", file.display());
+            groups.entry(key).or_insert((0, example.clone())).0 += 1;
+            failed.push(example);
         }
     }
 
     println!(
-        "{ok}/{} files parse ({} fail)",
+        "{ok}/{} files parse ({} fail; {failures} statements or batches don't parse)",
         files.len(),
         files.len() - ok
     );
@@ -109,7 +175,7 @@ fn check(args: &[String]) -> ExitCode {
         println!("{n:5}  {msg}\n       {example}");
     }
     if list_files {
-        println!("\nfailing files:");
+        println!("\nfailing statements:");
         for f in &failed {
             println!("  {f}");
         }
@@ -121,24 +187,26 @@ fn check(args: &[String]) -> ExitCode {
     }
 }
 
-/// `sqp-fmt spans [--details] <path>...`: audit the AST source spans of every
-/// batch that parses (see `sqp_fmt::spans`), grouped by problem and node kind.
+/// `sqp-fmt spans [--config FILE] [--dialect NAME] [--details] <path>...`:
+/// audit the AST source spans of every batch that parses (see
+/// `sqp_fmt::spans`), grouped by problem and node kind.
 fn spans(args: &[String]) -> ExitCode {
-    let details = args.iter().any(|a| a == "--details");
-    let roots: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
-    if roots.is_empty() {
+    let inp = match inputs(args) {
+        Ok(i) => i,
+        Err(code) => return code,
+    };
+    if let Some(f) = inp.flags.iter().find(|f| *f != "--details") {
+        eprintln!("sqp-fmt: spans: unknown option {f}");
         return usage();
     }
-    let mut files = Vec::new();
-    for r in roots {
-        collect(Path::new(r), &mut files);
-    }
+    let details = !inp.flags.is_empty();
+    let files = &inp.files;
 
     let mut audit = sqp_fmt::spans::Audit::default();
     let (mut batches, mut skipped) = (0, 0);
     // (problem, node) -> locations "file:line:col"
     let mut groups: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
-    for file in &files {
+    for file in files {
         let src = match std::fs::read_to_string(file) {
             Ok(s) => s,
             Err(e) => {
@@ -146,8 +214,11 @@ fn spans(args: &[String]) -> ExitCode {
                 continue;
             }
         };
-        for batch in sqp_fmt::split_batches(&src) {
-            if sqp_fmt::spans::audit_batch(&batch, &mut audit).is_err() {
+        let Some(cfg) = inp.config_for(file) else {
+            return ExitCode::from(2);
+        };
+        for batch in sqp_fmt::split_batches(&src, &cfg) {
+            if sqp_fmt::spans::audit_batch(&batch, &cfg, &mut audit).is_err() {
                 skipped += 1;
                 continue;
             }

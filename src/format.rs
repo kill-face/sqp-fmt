@@ -1,23 +1,29 @@
-//! Formatting a whole file: line endings, `GO` / SQLCMD lines,
-//! `@formatter:off` regions, and the per-batch safety net.
+//! Formatting a whole file: line endings, the client's script syntax (kept
+//! as written), `@formatter:off` regions, one SQL part at a time; and the
+//! safety net.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use sqlparser::ast::Statement;
 use sqlparser::dialect::Dialect;
-use sqlparser::parser::{Parser, ParserOptions};
+use sqlparser::parser::{Parser, ParserError, ParserOptions};
 use sqlparser::tokenizer::{Location, Token, TokenWithSpan, Tokenizer, Whitespace};
 
 use crate::config::Config;
 use crate::layout::{self, Gap, Layout, Rule, Tok, Trivia, TriviaItem};
-use crate::{LexState, is_go_line, is_sqlcmd_line};
+use crate::script::{self, Client, Lexed, PartKind, Positions};
 
-/// What happened to the batches of a file.
+/// What happened to the batches of a file. A batch is a part of the file
+/// between client commands: a `GO` batch for sqlcmd; for the other clients,
+/// which send one statement at a time, the statements between commands.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Stats {
     pub batches: usize,
     /// Formatted.
     pub formatted: usize,
+    /// Formatted, but some of their statements don't parse and are left as
+    /// written (clients that send statements one at a time).
+    pub partial: usize,
     /// Left as written because they don't parse (or don't tokenize).
     pub unparsed: usize,
     /// Left as written because the output's tokens differed from the input's.
@@ -26,8 +32,13 @@ pub struct Stats {
     pub errors: usize,
     /// Left as written because they lie wholly in `@formatter:off` regions.
     pub off: usize,
-    /// Details of mismatches and errors (batch start line, message).
+    /// Statements left as written in partly formatted batches.
+    pub unparsed_statements: usize,
+    /// Details of mismatches and errors (file line, message).
     pub problems: Vec<(usize, String)>,
+    /// Parser errors of what was left as written: the batch's, or each
+    /// statement's in a partly formatted batch (file line, message).
+    pub parse_errors: Vec<(usize, String)>,
 }
 
 /// Formats a file with the default configuration (see `format_with`).
@@ -58,31 +69,26 @@ pub fn format_with(src: &str, cfg: &Config) -> (String, Stats) {
         lines.pop();
     }
 
-    let off = off_lines(&lines);
+    let script = script::split(&text, lines.len(), cfg);
+    let off = off_lines(&script.markers, lines.len());
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
-    let mut state = LexState::default();
-    let mut batch_start = 0;
-    let mut i = 0;
-    let flush = |from: usize, to: usize, out: &mut Vec<String>, stats: &mut Stats| {
-        if from < to {
-            format_batch(&lines[from..to], &off[from..to], from, cfg, out, stats);
+    for part in &script.parts {
+        let r = part.lines.clone();
+        match &part.kind {
+            PartKind::Sql { delimiter } => format_batch(
+                &lines[r.clone()],
+                &off[r.clone()],
+                r.start,
+                cfg,
+                delimiter,
+                &mut out,
+                &mut stats,
+            ),
+            PartKind::Directive | PartKind::Data => {
+                out.extend(lines[r].iter().map(|l| l.to_string()));
+            }
         }
-    };
-    // `GO` and `:` commands are sqlcmd's (T-SQL's client).
-    let sqlcmd = cfg.dialect_name() == "mssql";
-    while i < lines.len() {
-        let line = lines[i];
-        let top = state.at_top_level();
-        if sqlcmd && top && (is_go_line(line) || is_sqlcmd_line(line)) {
-            flush(batch_start, i, &mut out, &mut stats);
-            out.push(line.to_string());
-            batch_start = i + 1;
-        } else {
-            state = state.advance(line);
-        }
-        i += 1;
     }
-    flush(batch_start, lines.len(), &mut out, &mut stats);
 
     let mut result = out.join("\n");
     if final_nl {
@@ -98,42 +104,39 @@ pub fn format_with(src: &str, cfg: &Config) -> (String, Stats) {
 }
 
 /// Which lines lie in `@formatter:off` regions (from the line with the
-/// `off` marker to the line with the `on` marker, both included).
-fn off_lines(lines: &[&str]) -> Vec<bool> {
-    let mut off = vec![false; lines.len()];
-    let mut state = LexState::default();
+/// `off` marker to the line with the `on` marker, both included), from the
+/// markers in the file's comments.
+fn off_lines(markers: &[(usize, bool)], n: usize) -> Vec<bool> {
+    let mut off = vec![false; n];
     let mut active = false;
-    for (i, line) in lines.iter().enumerate() {
-        let mut markers = Vec::new();
-        state = state.advance_comments(line, |c| {
-            if c.contains("@formatter:off") {
-                markers.push(true);
-            } else if c.contains("@formatter:on") {
-                markers.push(false);
-            }
-        });
+    let mut k = 0;
+    for (i, o) in off.iter_mut().enumerate() {
         let was = active;
-        for m in markers {
-            active = m;
+        while k < markers.len() && markers[k].0 <= i {
+            if markers[k].0 == i {
+                active = !markers[k].1;
+            }
+            k += 1;
         }
-        off[i] = was || active;
+        *o = was || active;
     }
     off
 }
 
-/// Formats one batch (lines between `GO` / SQLCMD lines), appending the
-/// output lines to `out`.
+/// Formats one batch (lines between client commands), appending the output
+/// lines to `out`.
 fn format_batch(
     lines: &[&str],
     off: &[bool],
     first_line: usize,
     cfg: &Config,
+    delimiter: &str,
     out: &mut Vec<String>,
     stats: &mut Stats,
 ) {
     let verbatim = |out: &mut Vec<String>| out.extend(lines.iter().map(|l| l.to_string()));
     if lines.iter().all(|l| l.trim().is_empty()) {
-        // Blank lines between GO lines: collapse to one.
+        // Blank lines between client commands: collapse to one.
         out.push(String::new());
         return;
     }
@@ -149,14 +152,26 @@ fn format_batch(
     }
     let mut text = lines.join("\n");
     text.push('\n');
-    let result = catch_unwind(AssertUnwindSafe(|| format_text(&text, off, cfg)));
+    let at = |line: usize| first_line + line;
+    let result = catch_unwind(AssertUnwindSafe(|| format_text(&text, off, cfg, delimiter)));
     match result {
-        Ok(Ok(formatted)) => {
-            stats.formatted += 1;
-            out.extend(formatted);
+        Ok(Ok(f)) => {
+            if f.unparsed.is_empty() {
+                stats.formatted += 1;
+            } else {
+                stats.partial += 1;
+                stats.unparsed_statements += f.unparsed.len();
+                stats
+                    .parse_errors
+                    .extend(f.unparsed.into_iter().map(|(l, m)| (at(l), m)));
+            }
+            out.extend(f.lines);
         }
-        Ok(Err(BatchError::Unparsed)) => {
+        Ok(Err(BatchError::Unparsed(errors))) => {
             stats.unparsed += 1;
+            stats
+                .parse_errors
+                .extend(errors.into_iter().map(|(l, m)| (at(l), m)));
             verbatim(out);
         }
         Ok(Err(BatchError::Mismatch(msg))) => {
@@ -186,38 +201,191 @@ fn format_batch(
 
 #[derive(Debug)]
 pub enum BatchError {
-    Unparsed,
+    /// Doesn't tokenize or parse: the errors, by 0-based line in the batch.
+    Unparsed(Vec<(usize, String)>),
     Mismatch(String),
     Internal(String),
 }
 
-fn options() -> ParserOptions {
+/// A formatted batch.
+#[derive(Debug)]
+pub struct Formatted {
+    pub lines: Vec<String>,
+    /// The statements left as written: their parser errors, by 0-based
+    /// line in the batch.
+    pub unparsed: Vec<(usize, String)>,
+}
+
+/// Parser options for a client's batches. sqlcmd sends a whole `GO` batch,
+/// in which T-SQL lets statements follow each other without `;`. The other
+/// clients send one statement at a time, ended by the client's terminator:
+/// a statement must end there (or at the end of the text), so a statement
+/// the parser only partly understands is reported, not split in two.
+pub fn options(client: Client) -> ParserOptions {
     ParserOptions {
-        require_semicolon_stmt_delimiter: false,
+        require_semicolon_stmt_delimiter: client.sends_statements(),
         ..ParserOptions::default()
     }
 }
 
-pub fn parse(text: &str, dialect: &dyn Dialect) -> Option<Vec<Statement>> {
-    let mut parser = Parser::new(dialect)
-        .with_options(options())
-        .try_with_sql(text)
-        .ok()?;
-    parser.parse_statements().ok()
+/// Parses tokens (see `script::lex`) as a whole.
+pub fn parse_tokens(
+    toks: &[TokenWithSpan],
+    dialect: &dyn Dialect,
+    client: Client,
+) -> Result<Vec<Statement>, ParserError> {
+    Parser::new(dialect)
+        .with_options(options(client))
+        .with_tokens_with_locations(toks.to_vec())
+        .parse_statements()
 }
 
-fn parse_tokens(toks: Vec<TokenWithSpan>, dialect: &dyn Dialect) -> Option<Vec<Statement>> {
-    let mut parser = Parser::new(dialect)
-        .with_options(options())
-        .with_tokens_with_locations(toks);
-    parser.parse_statements().ok()
+/// 0-based line of a parser error (its "at Line: n" position, else 0).
+fn error_line(e: &ParserError) -> usize {
+    let msg = e.to_string();
+    msg.split_once(" at Line: ")
+        .and_then(|(_, p)| p.split(',').next()?.trim().parse::<usize>().ok())
+        .map_or(0, |l| l.saturating_sub(1))
+}
+
+/// The parse of a batch: its statements, and the statements that don't
+/// parse (their lines and errors).
+pub struct Parsed {
+    pub stmts: Vec<Statement>,
+    /// 0-based lines of the statements that don't parse.
+    pub failed_lines: Vec<bool>,
+    /// Parser errors of the statements that don't parse, by 0-based line.
+    pub unparsed: Vec<(usize, String)>,
+}
+
+/// The first and last 0-based line a token is on (a token ending at the
+/// start of a line, like a newline, doesn't reach into it).
+fn token_lines(t: &TokenWithSpan) -> (usize, usize) {
+    let first = t.span.start.line.max(1) as usize - 1;
+    let mut last = t.span.end.line.max(1) as usize - 1;
+    if t.span.end.column == 1 && last > first {
+        last -= 1;
+    }
+    (first, last)
+}
+
+/// Parses a batch (`nlines` lines). sqlcmd sends the batch as a whole, so
+/// it parses as a whole or not at all (`Unparsed`). The other clients send
+/// each statement on its own, so a statement that doesn't parse doesn't
+/// affect the others: the parser reads statement after statement, and
+/// after an error resumes past the client statement (up to its terminator)
+/// the error is in; the failed statement's lines are left as written.
+pub fn parse_batch(
+    lx: &Lexed,
+    nlines: usize,
+    dialect: &dyn Dialect,
+    client: Client,
+    delimiter: &str,
+) -> Result<Parsed, BatchError> {
+    let mut failed_lines = vec![false; nlines];
+    if !client.sends_statements() {
+        return match parse_tokens(&lx.toks, dialect, client) {
+            Ok(stmts) => Ok(Parsed {
+                stmts,
+                failed_lines,
+                unparsed: Vec::new(),
+            }),
+            Err(e) => Err(BatchError::Unparsed(vec![(error_line(&e), e.to_string())])),
+        };
+    }
+    // Where each client statement ends (exclusive token index).
+    let ends: Vec<usize> = lx
+        .statements(client, delimiter)
+        .iter()
+        .map(|r| r.end)
+        .collect();
+    let end_of = |i: usize| {
+        let k = ends.partition_point(|&e| e <= i);
+        ends.get(k).copied().unwrap_or(lx.toks.len())
+    };
+    let mut stmts = Vec::new();
+    let mut unparsed = Vec::new();
+    let mut from = 0;
+    'restart: while from < lx.toks.len() {
+        let mut p = Parser::new(dialect)
+            .with_options(options(client))
+            .with_tokens_with_locations(lx.toks[from..].to_vec());
+        loop {
+            while p.consume_token(&Token::SemiColon) {}
+            if p.peek_token_ref().token == Token::EOF {
+                break 'restart;
+            }
+            // The statement's first token (the parser skips whitespace).
+            let start = from + p.index() + {
+                let rest = &lx.toks[from + p.index()..];
+                rest.iter()
+                    .position(|t| !matches!(t.token, Token::Whitespace(_)))
+                    .unwrap_or(0)
+            };
+            let r = p
+                .parse_statement()
+                .and_then(|s| match p.peek_token_ref().token {
+                    Token::SemiColon | Token::EOF => Ok(s),
+                    _ => p.expected_ref("end of statement", p.peek_token_ref()),
+                });
+            match r {
+                Ok(s) => stmts.push(s),
+                Err(e) => {
+                    // The last token the parser read (it stops on or right
+                    // after the one it can't take).
+                    let at = (from + p.index().saturating_sub(1))
+                        .clamp(start, lx.toks.len().saturating_sub(1));
+                    let to = end_of(at).max(start + 1);
+                    let (a, _) = token_lines(&lx.toks[start]);
+                    let (_, b) = token_lines(&lx.toks[to - 1]);
+                    for f in failed_lines.iter_mut().take(b + 1).skip(a) {
+                        *f = true;
+                    }
+                    unparsed.push((error_line(&e).max(a), e.to_string()));
+                    from = to;
+                    continue 'restart;
+                }
+            }
+        }
+    }
+    if stmts.is_empty() && !unparsed.is_empty() {
+        return Err(BatchError::Unparsed(unparsed));
+    }
+    // A token can't be partly left as written.
+    loop {
+        let mut grew = false;
+        for t in &lx.toks {
+            let (a, b) = token_lines(t);
+            if a != b && (a..=b).any(|i| failed_lines.get(i) == Some(&true)) {
+                for f in failed_lines.iter_mut().take(b + 1).skip(a) {
+                    grew |= !*f;
+                    *f = true;
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    Ok(Parsed {
+        stmts,
+        failed_lines,
+        unparsed,
+    })
 }
 
 /// Formats the text of one batch (ending in a newline). `off` marks the
-/// batch's lines in `@formatter:off` regions. Returns the output lines.
-pub fn format_text(text: &str, off: &[bool], cfg: &Config) -> Result<Vec<String>, BatchError> {
+/// batch's lines in `@formatter:off` regions; `delimiter` is the mysql
+/// client's delimiter in effect.
+pub fn format_text(
+    text: &str,
+    off: &[bool],
+    cfg: &Config,
+    delimiter: &str,
+) -> Result<Formatted, BatchError> {
     let dialect = cfg.dialect();
     let dialect = dialect.as_ref();
+    let client = Client::of(cfg.dialect_name());
     let timing = std::env::var_os("SQP_FMT_TIMING").is_some();
     let t = std::time::Instant::now();
     let lap = |what: &str| {
@@ -225,26 +393,36 @@ pub fn format_text(text: &str, off: &[bool], cfg: &Config) -> Result<Vec<String>
             eprintln!("{what}: {:?}", t.elapsed());
         }
     };
-    let raw_toks = Tokenizer::new(dialect, text)
-        .tokenize_with_location()
-        .map_err(|_| BatchError::Unparsed)?;
+    let lx = script::lex(text, dialect, client, delimiter);
+    if let Some(e) = &lx.error {
+        let line = e.location.line.max(1) as usize - 1;
+        return Err(BatchError::Unparsed(vec![(line, e.to_string())]));
+    }
     lap("tokenize");
-    let stmts = parse_tokens(raw_toks.clone(), dialect).ok_or(BatchError::Unparsed)?;
+    let nlines = text.split('\n').count();
+    let parsed = parse_batch(&lx, nlines, dialect, client, delimiter)?;
     lap("parse");
-    let mut l = layout_from_tokens(text, &raw_toks, off)?;
+    let off: Vec<bool> = (0..nlines)
+        .map(|i| off.get(i).copied().unwrap_or(false) || parsed.failed_lines[i])
+        .collect();
+    let mut l = layout_from_tokens(text, &lx.toks, &off)?;
     l.margin = cfg.margin;
     lap("layout");
-    crate::case::apply(&mut l, &stmts, cfg);
+    crate::case::apply(&mut l, &parsed.stmts, cfg);
     lap("case");
-    crate::build::build(&mut l, &stmts, cfg);
+    crate::build::build(&mut l, &parsed.stmts, cfg);
+    l.apart = apart(&l, dialect);
     lap("build");
     let lines = layout::print(&l);
     lap("print");
     let mut out = lines.join("\n");
     out.push('\n');
-    verify(&raw_toks, &l, &out, dialect)?;
+    verify(text, &lx, &l, &out, cfg, dialect, client, delimiter)?;
     lap("verify");
-    Ok(lines)
+    Ok(Formatted {
+        lines,
+        unparsed: parsed.unparsed,
+    })
 }
 
 /// Builds the token and trivia lists.
@@ -253,21 +431,10 @@ fn layout_from_tokens(
     raw_toks: &[sqlparser::tokenizer::TokenWithSpan],
     off: &[bool],
 ) -> Result<Layout, BatchError> {
+    let pos = Positions::new(text);
     let line_starts: Vec<usize> = std::iter::once(0)
         .chain(text.match_indices('\n').map(|(i, _)| i + 1))
         .collect();
-    let line_ascii: Vec<bool> = text.split('\n').map(|l| l.is_ascii()).collect();
-    let byte_of = |line: u64, col: u64| -> usize {
-        let li = (line - 1) as usize;
-        let ls = line_starts[li];
-        if line_ascii.get(li).copied().unwrap_or(false) {
-            return (ls + (col - 1) as usize).min(text.len());
-        }
-        let rest = &text[ls..];
-        rest.char_indices()
-            .nth((col - 1) as usize)
-            .map_or(text.len(), |(b, _)| ls + b)
-    };
     let is_off = |line0: usize| off.get(line0).copied().unwrap_or(false);
 
     let mut l = Layout::default();
@@ -279,14 +446,12 @@ fn layout_from_tokens(
         if matches!(t.token, Token::EOF) {
             continue;
         }
-        let line0 = (t.span.start.line - 1) as usize;
-        let end_line0 = (t.span.end.line - 1) as usize;
+        let (line0, end_line0) = token_lines(t);
         let is_nl = matches!(t.token, Token::Whitespace(Whitespace::Newline));
         // A newline belongs to the line it ends.
         let in_off = is_off(line0) && (!is_nl || is_off(line0 + 1));
         if in_off {
-            let last_nonnl = if is_nl { line0 } else { end_line0 };
-            if !is_off(last_nonnl) {
+            if !is_off(end_line0) {
                 return Err(BatchError::Internal(
                     "token crosses a formatter:off boundary".into(),
                 ));
@@ -313,7 +478,7 @@ fn layout_from_tokens(
                     &mut l,
                     t,
                     text,
-                    &byte_of,
+                    &pos,
                     std::mem::take(&mut trivia),
                     space,
                     true,
@@ -322,7 +487,7 @@ fn layout_from_tokens(
             }
             continue;
         }
-        if !is_nl && end_line0 != line0 && (line0..=end_line0).any(is_off) {
+        if end_line0 != line0 && (line0..=end_line0).any(is_off) {
             return Err(BatchError::Internal(
                 "token crosses a formatter:off boundary".into(),
             ));
@@ -344,7 +509,7 @@ fn layout_from_tokens(
                     &mut l,
                     t,
                     text,
-                    &byte_of,
+                    &pos,
                     std::mem::take(&mut trivia),
                     space,
                     false,
@@ -371,19 +536,39 @@ fn layout_from_tokens(
     Ok(l)
 }
 
+/// Which gaps must keep a space (see `Layout::apart`): the source had
+/// whitespace there, the gap's rule may print it without, and the two
+/// tokens written together tokenize as something else.
+fn apart(l: &Layout, dialect: &dyn Dialect) -> Vec<bool> {
+    (0..l.toks.len())
+        .map(|i| {
+            if i == 0 || !l.trivia[i].had_space(l.src_space[i]) || !layout::may_join(l, i) {
+                return false;
+            }
+            let (a, b) = (&l.toks[i - 1], &l.toks[i]);
+            let glued = format!("{}{}", a.text, b.text);
+            match Tokenizer::new(dialect, &glued).tokenize() {
+                Ok(t) => {
+                    let t: Vec<&Token> = t.iter().filter(|t| **t != Token::EOF).collect();
+                    // Case aside: the words may have been re-cased already.
+                    !(t.len() == 2 && same(&a.token, t[0], true) && same(&b.token, t[1], true))
+                }
+                Err(_) => true,
+            }
+        })
+        .collect()
+}
+
 fn push_tok(
     l: &mut Layout,
     t: &sqlparser::tokenizer::TokenWithSpan,
     text: &str,
-    byte_of: &dyn Fn(u64, u64) -> usize,
+    pos: &Positions,
     trivia: Trivia,
     space: bool,
     raw: bool,
 ) {
-    let (a, b) = (
-        byte_of(t.span.start.line, t.span.start.column),
-        byte_of(t.span.end.line, t.span.end.column),
-    );
+    let (a, b) = (pos.byte(t.span.start), pos.byte(t.span.end));
     l.toks.push(Tok {
         token: t.token.clone(),
         start: t.span.start,
@@ -400,19 +585,29 @@ fn push_tok(
 
 /// The safety net: the output must have the same tokens as the input,
 /// comments included; only whitespace may differ, and case only for words
-/// the formatter lower-cased.
+/// the formatter re-cased. A client terminator (a mysql delimiter, psql's
+/// `\g ...`) must keep its text, and the output must still be one batch
+/// of SQL to the client (no line of it now read as a client command).
+#[allow(clippy::too_many_arguments)]
 fn verify(
-    input: &[TokenWithSpan],
+    text: &str,
+    input: &Lexed,
     l: &Layout,
     out: &str,
+    cfg: &Config,
     dialect: &dyn Dialect,
+    client: Client,
+    delimiter: &str,
 ) -> Result<(), BatchError> {
-    let toks = Tokenizer::new(dialect, out)
-        .tokenize()
-        .map_err(|e| BatchError::Mismatch(format!("output doesn't tokenize: {e}")))?;
-    let significant = |t: &Token| {
+    let got = script::lex(out, dialect, client, delimiter);
+    if let Some(e) = &got.error {
+        return Err(BatchError::Mismatch(format!(
+            "output doesn't tokenize: {e}"
+        )));
+    }
+    let significant = |t: &&TokenWithSpan| {
         !matches!(
-            t,
+            t.token,
             Token::Whitespace(Whitespace::Space | Whitespace::Tab | Whitespace::Newline)
                 | Token::EOF
         )
@@ -423,22 +618,39 @@ fn verify(
         .filter(|t| t.case_changed)
         .map(|t| t.start)
         .collect();
-    let mut got = toks.iter().filter(|t| significant(t));
-    for want in input.iter().filter(|t| significant(&t.token)) {
-        match got.next() {
-            Some(g) if same(&want.token, g, changed.contains(&want.span.start)) => {}
+    let (pin, pout) = (Positions::new(text), Positions::new(out));
+    let mut it = got.toks.iter().filter(significant);
+    for want in input.toks.iter().filter(significant) {
+        match it.next() {
+            Some(g)
+                if same(&want.token, &g.token, changed.contains(&want.span.start))
+                    && (want.token != Token::SemiColon
+                        || pin.slice(want.span) == pout.slice(g.span)) => {}
             other => {
                 return Err(BatchError::Mismatch(format!(
-                    "{:?} at {} became {other:?}",
-                    want.token, want.span.start
+                    "{:?} at {} became {:?}",
+                    want.token,
+                    want.span.start,
+                    other.map(|g| &g.token)
                 )));
             }
         }
     }
-    if let Some(extra) = got.next() {
+    if let Some(extra) = it.next() {
         return Err(BatchError::Mismatch(format!(
-            "extra output token {extra:?}"
+            "extra output token {:?}",
+            extra.token
         )));
+    }
+    let nlines = out.strip_suffix('\n').unwrap_or(out).split('\n').count();
+    let parts = script::split_lexed(out, nlines, cfg, delimiter, Some(got)).parts;
+    if parts
+        .iter()
+        .any(|p| !matches!(p.kind, PartKind::Sql { .. }))
+    {
+        return Err(BatchError::Mismatch(
+            "the output has a line the client would read as a command".into(),
+        ));
     }
     Ok(())
 }

@@ -718,8 +718,11 @@ impl Builder<'_> {
         }
     }
 
+    /// A keyword a statement span may leave out (not one of a statement left
+    /// as written).
     fn is_leading_keyword(&self, i: usize) -> bool {
-        matches!(&self.l.toks[i].token, Token::Word(w) if w.quote_style.is_none()
+        !self.l.raw[i]
+            && matches!(&self.l.toks[i].token, Token::Word(w) if w.quote_style.is_none()
             && w.keyword != sqlparser::keywords::Keyword::NoKeyword
             && !["end", "begin", "else", "go", "try", "catch"].iter().any(|k| w.value.eq_ignore_ascii_case(k)))
     }
