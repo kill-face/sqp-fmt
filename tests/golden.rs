@@ -1,5 +1,5 @@
 //! Golden tests: every `tests/golden/NAME.sql` is formatted and compared
-//! with `tests/golden/NAME.expected.sql`. Set `TSQLFMT_BLESS=1` to write the
+//! with `tests/golden/NAME.expected.sql`. Set `SQP_FMT_BLESS=1` to write the
 //! expected files from the current output (then review the diff). A
 //! `tests/golden/NAME.toml` next to the input is that test's configuration
 //! (else the defaults).
@@ -36,12 +36,12 @@ fn expected_path(input: &Path) -> PathBuf {
 }
 
 /// The test's configuration: `NAME.toml`, or the defaults.
-fn config(input: &Path) -> tsqlfmt::Config {
+fn config(input: &Path) -> sqp_fmt::Config {
     let path = input.with_extension("toml");
     if path.exists() {
-        tsqlfmt::Config::load(&path).unwrap_or_else(|e| panic!("{e}"))
+        sqp_fmt::Config::load(&path).unwrap_or_else(|e| panic!("{e}"))
     } else {
-        tsqlfmt::Config::default()
+        sqp_fmt::Config::default()
     }
 }
 
@@ -87,12 +87,12 @@ fn diff(a: &str, b: &str) -> String {
 
 #[test]
 fn golden() {
-    let bless = std::env::var_os("TSQLFMT_BLESS").is_some();
+    let bless = std::env::var_os("SQP_FMT_BLESS").is_some();
     let mut failures = Vec::new();
     for input in cases() {
         let src = std::fs::read_to_string(&input).unwrap();
         let cfg = config(&input);
-        let (out, stats) = tsqlfmt::format_with(&src, &cfg);
+        let (out, stats) = sqp_fmt::format_with(&src, &cfg);
         let exp_path = expected_path(&input);
         if bless {
             std::fs::write(&exp_path, &out).unwrap();
@@ -120,7 +120,7 @@ fn tokens_preserved() {
             let Ok(src) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            let (out, _) = tsqlfmt::format_with(&src, &cfg);
+            let (out, _) = sqp_fmt::format_with(&src, &cfg);
             assert_eq!(
                 tokens(&src),
                 tokens(&out),
@@ -136,8 +136,8 @@ fn idempotent() {
     for input in cases() {
         let src = std::fs::read_to_string(&input).unwrap();
         let cfg = config(&input);
-        let (once, _) = tsqlfmt::format_with(&src, &cfg);
-        let (twice, _) = tsqlfmt::format_with(&once, &cfg);
+        let (once, _) = sqp_fmt::format_with(&src, &cfg);
+        let (twice, _) = sqp_fmt::format_with(&once, &cfg);
         assert!(
             once == twice,
             "{}: not idempotent\n{}",
@@ -145,7 +145,7 @@ fn idempotent() {
             diff(&once, &twice)
         );
         if let Ok(expected) = std::fs::read_to_string(expected_path(&input)) {
-            let (again, _) = tsqlfmt::format_with(&expected, &cfg);
+            let (again, _) = sqp_fmt::format_with(&expected, &cfg);
             assert!(
                 again == expected,
                 "{}: expected output isn't a fixed point\n{}",

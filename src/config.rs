@@ -1,4 +1,4 @@
-//! The configuration file, `tsqlfmt.toml`.
+//! The configuration file, `sqp-fmt.toml`.
 //!
 //! Every key is optional; a missing key (or a missing file) means today's
 //! house style (STYLE.md). The vocabulary follows JetBrains' code-style
@@ -17,7 +17,7 @@ use serde::Deserialize;
 use sqlparser::dialect::Dialect;
 
 /// The name of the configuration file.
-pub const FILE_NAME: &str = "tsqlfmt.toml";
+pub const FILE_NAME: &str = "sqp-fmt.toml";
 
 /// How a construct wraps when it has more than one element (JetBrains'
 /// "Wrapping" values).
@@ -562,7 +562,7 @@ impl Config {
     }
 
     /// The configuration for formatting a file in `dir`: the first
-    /// `tsqlfmt.toml` in `dir` or a directory above it, or the defaults.
+    /// `sqp-fmt.toml` in `dir` or a directory above it, or the defaults.
     pub fn discover(dir: &Path) -> Result<(Config, Option<PathBuf>), ConfigError> {
         match find(dir) {
             Some(p) => Config::load(&p).map(|c| (c, Some(p))),
@@ -804,7 +804,7 @@ macro_rules! as_list {
 }
 as_list!(KeptList, FilledList);
 
-/// The first `tsqlfmt.toml` in `dir` or a directory above it.
+/// The first `sqp-fmt.toml` in `dir` or a directory above it.
 pub fn find(dir: &Path) -> Option<PathBuf> {
     let dir = if dir.as_os_str().is_empty() {
         Path::new(".")
@@ -872,7 +872,7 @@ mod tests {
     use super::*;
 
     fn err(text: &str) -> String {
-        Config::parse(text, Some(Path::new("t/tsqlfmt.toml")))
+        Config::parse(text, Some(Path::new("t/sqp-fmt.toml")))
             .unwrap_err()
             .to_string()
     }
@@ -918,7 +918,7 @@ mod tests {
     fn unknown_key() {
         let e = err("margin = 100\n[window]\nwarp = \"never\"\n");
         assert!(
-            e.starts_with("t/tsqlfmt.toml:3:1: unknown field `warp`"),
+            e.starts_with("t/sqp-fmt.toml:3:1: unknown field `warp`"),
             "{e}"
         );
         assert!(e.contains("`wrap`"), "{e}");
@@ -928,7 +928,7 @@ mod tests {
     fn unknown_section() {
         let e = err("[selcet_list]\nwrap = \"never\"\n");
         assert!(
-            e.starts_with("t/tsqlfmt.toml:1:2: unknown field `selcet_list`"),
+            e.starts_with("t/sqp-fmt.toml:1:2: unknown field `selcet_list`"),
             "{e}"
         );
     }
@@ -937,14 +937,14 @@ mod tests {
     fn invalid_value() {
         let e = err("[where.groups]\nwrap = \"sometimes\"\n");
         assert!(
-            e.starts_with("t/tsqlfmt.toml:2:8: unknown variant `sometimes`"),
+            e.starts_with("t/sqp-fmt.toml:2:8: unknown variant `sometimes`"),
             "{e}"
         );
         assert!(e.contains("`chop_if_long`"), "{e}");
         let e = err("margin = \"wide\"\n");
-        assert!(e.starts_with("t/tsqlfmt.toml:1:10: invalid type"), "{e}");
+        assert!(e.starts_with("t/sqp-fmt.toml:1:10: invalid type"), "{e}");
         let e = err("[case]\nalign_then = 1\n");
-        assert!(e.starts_with("t/tsqlfmt.toml:2:14: invalid type"), "{e}");
+        assert!(e.starts_with("t/sqp-fmt.toml:2:14: invalid type"), "{e}");
     }
 
     #[test]
@@ -952,17 +952,17 @@ mod tests {
         let e = err("margin = 5\n");
         assert_eq!(
             e,
-            "t/tsqlfmt.toml:1:10: margin 5 is out of range (20 to 1000)"
+            "t/sqp-fmt.toml:1:10: margin 5 is out of range (20 to 1000)"
         );
         let e = err("indent = 0\n");
-        assert_eq!(e, "t/tsqlfmt.toml:1:10: indent 0 is out of range (1 to 16)");
+        assert_eq!(e, "t/sqp-fmt.toml:1:10: indent 0 is out of range (1 to 16)");
     }
 
     #[test]
     fn unknown_dialect() {
         let e = err("dialect = \"tsql\"\n");
         assert!(
-            e.starts_with("t/tsqlfmt.toml:1:11: unknown dialect \"tsql\" (one of: \"mssql\""),
+            e.starts_with("t/sqp-fmt.toml:1:11: unknown dialect \"tsql\" (one of: \"mssql\""),
             "{e}"
         );
         for d in DIALECTS {
@@ -977,7 +977,7 @@ mod tests {
         let e = err("[exists]\nwrap = \"never\"\n");
         assert_eq!(
             e,
-            "t/tsqlfmt.toml:2:8: exists.wrap = \"never\" is not implemented yet for exists.wrap (implemented: \"always\")"
+            "t/sqp-fmt.toml:2:8: exists.wrap = \"never\" is not implemented yet for exists.wrap (implemented: \"always\")"
         );
         let e = err("[if_condition]\nwrap = \"always\"\n");
         assert!(
@@ -988,14 +988,14 @@ mod tests {
         );
         let e = err("case = { wrap = \"if_long\" }\n");
         assert!(
-            e.starts_with("t/tsqlfmt.toml:1:17: case.wrap = \"if_long\" is not implemented yet"),
+            e.starts_with("t/sqp-fmt.toml:1:17: case.wrap = \"if_long\" is not implemented yet"),
             "{e}"
         );
     }
 
     #[test]
     fn find_walks_up() {
-        let root = std::env::temp_dir().join(format!("tsqlfmt-find-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("sqp-fmt-find-{}", std::process::id()));
         let deep = root.join("a/b/c");
         std::fs::create_dir_all(&deep).unwrap();
         assert!(find(&deep).is_none_or(|p| !p.starts_with(&root)));

@@ -1,4 +1,4 @@
-//! The `tsqlfmt` command: finding `tsqlfmt.toml`, `--config`,
+//! The `sqp-fmt` command: finding `sqp-fmt.toml`, `--config`,
 //! `--stdin-filepath`, configuration errors.
 
 use std::io::Write;
@@ -17,7 +17,7 @@ struct Tree(PathBuf);
 
 impl Tree {
     fn new(name: &str) -> Tree {
-        let root = std::env::temp_dir().join(format!("tsqlfmt-cli-{name}-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("sqp-fmt-cli-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         Tree(root)
@@ -38,7 +38,7 @@ impl Drop for Tree {
 }
 
 fn run(args: &[&str], cwd: &Path, stdin: Option<&str>) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_tsqlfmt"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sqp-fmt"))
         .args(args)
         .current_dir(cwd)
         .stdin(Stdio::piped())
@@ -63,7 +63,7 @@ fn stdout(o: &Output) -> String {
 
 fn tree_with_config(name: &str) -> Tree {
     let t = Tree::new(name);
-    t.file("proj/tsqlfmt.toml", "[where.groups]\nwrap = \"always\"\n");
+    t.file("proj/sqp-fmt.toml", "[where.groups]\nwrap = \"always\"\n");
     t.file("proj/sub/deeper/q.sql", SQL);
     t.file("other/q.sql", SQL);
     t
@@ -83,7 +83,7 @@ fn file_finds_the_config_above_it() {
 #[test]
 fn nearest_config_wins() {
     let t = tree_with_config("nearest_config_wins");
-    t.file("proj/sub/tsqlfmt.toml", "keyword_case = \"upper\"\n");
+    t.file("proj/sub/sqp-fmt.toml", "keyword_case = \"upper\"\n");
     let out = run(&["proj/sub/deeper/q.sql"], &t.0, None);
     // The nearer file is the whole configuration: no merging.
     assert_eq!(stdout(&out), UPPER);
@@ -141,7 +141,7 @@ fn config_flag_overrides_the_search() {
 fn bad_config_is_an_error_with_no_output() {
     let t = Tree::new("bad");
     t.file(
-        "tsqlfmt.toml",
+        "sqp-fmt.toml",
         "margin = 100\n[window]\nwrap = \"sometimes\"\n",
     );
     let q = t.file("q.sql", SQL);
@@ -150,17 +150,17 @@ fn bad_config_is_an_error_with_no_output() {
     assert!(out.stdout.is_empty());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("tsqlfmt.toml:3:8: unknown variant `sometimes`"),
+        err.contains("sqp-fmt.toml:3:8: unknown variant `sometimes`"),
         "{err}"
     );
 
-    t.file("tsqlfmt.toml", "[exists]\nwrap = \"never\"\n");
+    t.file("sqp-fmt.toml", "[exists]\nwrap = \"never\"\n");
     let out = run(&[], &t.0, Some(SQL));
     assert_eq!(out.status.code(), Some(2));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
         err.contains(
-            "tsqlfmt.toml:2:8: exists.wrap = \"never\" is not implemented yet for exists.wrap"
+            "sqp-fmt.toml:2:8: exists.wrap = \"never\" is not implemented yet for exists.wrap"
         ),
         "{err}"
     );

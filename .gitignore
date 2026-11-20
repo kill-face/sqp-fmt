@@ -2,5 +2,5 @@
 result
 result-*
 .direnv/
-# Never commit SQL from private repos; point TSQLFMT_CORPUS at them instead.
+# Never commit SQL from private repos; point SQP_FMT_CORPUS at them instead.
 /corpus/

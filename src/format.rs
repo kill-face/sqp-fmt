@@ -216,7 +216,7 @@ fn parse_tokens(toks: Vec<TokenWithSpan>, dialect: &dyn Dialect) -> Option<Vec<S
 pub fn format_text(text: &str, off: &[bool], cfg: &Config) -> Result<Vec<String>, BatchError> {
     let dialect = cfg.dialect();
     let dialect = dialect.as_ref();
-    let timing = std::env::var_os("TSQLFMT_TIMING").is_some();
+    let timing = std::env::var_os("SQP_FMT_TIMING").is_some();
     let t = std::time::Instant::now();
     let lap = |what: &str| {
         if timing {

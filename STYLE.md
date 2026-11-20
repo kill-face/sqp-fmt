@@ -108,11 +108,11 @@ where the two changes above apply or the file was simply out of style.
 
 ## Configuration
 
-Each construct's layout can be changed in a `tsqlfmt.toml` (found by
+Each construct's layout can be changed in a `sqp-fmt.toml` (found by
 searching upward from the formatted file's directory; `--config FILE`,
 `--stdin-filepath PATH` for stdin). [docs/config.md](docs/config.md) is the
 reference: every key, its values, its JetBrains counterpart, examples, and
-what's implemented. Without the file, tsqlfmt formats as described here.
+what's implemented. Without the file, sqp-fmt formats as described here.
 
 The vocabulary is JetBrains':
 
@@ -136,7 +136,7 @@ R1 to R27.
 
 ## Rules
 
-What `tsqlfmt` implements, rule by rule. Each has a golden test in
+What `sqp-fmt` implements, rule by rule. Each has a golden test in
 `tests/golden/` (input `NN-name.sql`, output `NN-name.expected.sql`). Where a
 rule comes from the test bed rather than the JetBrains scheme, the counts are
 from `corpus/private/` (house style); "keeps" means the author's line break is
@@ -445,10 +445,10 @@ is what's implemented.
   false` and `ALIGN_TYPE_IN_ARGUMENT_DEFINITION = false`, but R8 aligns
   aliases, R18 aligns `=` in `set`, R20 aligns column types and R22
   parameter types (`ROUTINE_ARG_ALIGN_TYPES = true`; DataGrip's reference
-  output aligns the table's types too, but not `set`'s `=`). tsqlfmt follows
+  output aligns the table's types too, but not `set`'s `=`). sqp-fmt follows
   the test bed; `select_list.align_aliases`, `create_table.align_columns`
   and `routine_params.align_types` switch it off (`set` has no key yet).
-- JetBrains keeps each line break the author wrote; tsqlfmt's
+- JetBrains keeps each line break the author wrote; sqp-fmt's
   `keep_line_breaks` instead makes a group with a line break after its `(`
   (a window with any line break) a whole block, and chops a whole
   `chop_if_long` list with a line break in it.

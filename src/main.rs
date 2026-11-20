@@ -1,9 +1,9 @@
-//! `tsqlfmt check <path>...`: parse every .sql file under the paths and
+//! `sqp-fmt check <path>...`: parse every .sql file under the paths and
 //! report which fail, grouped by parser error. This is the progress measure
 //! for the grammar work in the sqlparser-rs fork.
 //!
-//! `tsqlfmt spans [--details] <path>...`: audit the source spans of the parsed
-//! AST (see `tsqlfmt::spans`), the progress measure for the span work.
+//! `sqp-fmt spans [--details] <path>...`: audit the source spans of the parsed
+//! AST (see `sqp_fmt::spans`), the progress measure for the span work.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -13,11 +13,11 @@ mod corpus;
 
 pub(crate) fn usage() -> ExitCode {
     eprintln!(
-        "usage: tsqlfmt [--config FILE] [--stdin-filepath PATH] [FILE | -]\n         \
-         format FILE (or stdin) to stdout, with FILE's (PATH's) tsqlfmt.toml\n       \
-         tsqlfmt corpus [--config FILE] [--diff FILE] [--top N] <path>...\n       \
-         tsqlfmt check [--files] <path>...\n       \
-         tsqlfmt spans [--details] <path>..."
+        "usage: sqp-fmt [--config FILE] [--stdin-filepath PATH] [FILE | -]\n         \
+         format FILE (or stdin) to stdout, with FILE's (PATH's) sqp-fmt.toml\n       \
+         sqp-fmt corpus [--config FILE] [--diff FILE] [--top N] <path>...\n       \
+         sqp-fmt check [--files] <path>...\n       \
+         sqp-fmt spans [--details] <path>..."
     );
     ExitCode::from(2)
 }
@@ -75,9 +75,9 @@ fn check(args: &[String]) -> ExitCode {
                 continue;
             }
         };
-        let err = tsqlfmt::split_batches(&src)
+        let err = sqp_fmt::split_batches(&src)
             .iter()
-            .find_map(|b| tsqlfmt::parse_batch(b).err());
+            .find_map(|b| sqp_fmt::parse_batch(b).err());
         match err {
             None => ok += 1,
             Some(e) => {
@@ -116,8 +116,8 @@ fn check(args: &[String]) -> ExitCode {
     }
 }
 
-/// `tsqlfmt spans [--details] <path>...`: audit the AST source spans of every
-/// batch that parses (see `tsqlfmt::spans`), grouped by problem and node kind.
+/// `sqp-fmt spans [--details] <path>...`: audit the AST source spans of every
+/// batch that parses (see `sqp_fmt::spans`), grouped by problem and node kind.
 fn spans(args: &[String]) -> ExitCode {
     let details = args.iter().any(|a| a == "--details");
     let roots: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
@@ -129,7 +129,7 @@ fn spans(args: &[String]) -> ExitCode {
         collect(Path::new(r), &mut files);
     }
 
-    let mut audit = tsqlfmt::spans::Audit::default();
+    let mut audit = sqp_fmt::spans::Audit::default();
     let (mut batches, mut skipped) = (0, 0);
     // (problem, node) -> locations "file:line:col"
     let mut groups: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
@@ -141,8 +141,8 @@ fn spans(args: &[String]) -> ExitCode {
                 continue;
             }
         };
-        for batch in tsqlfmt::split_batches(&src) {
-            if tsqlfmt::spans::audit_batch(&batch, &mut audit).is_err() {
+        for batch in sqp_fmt::split_batches(&src) {
+            if sqp_fmt::spans::audit_batch(&batch, &mut audit).is_err() {
                 skipped += 1;
                 continue;
             }
@@ -200,11 +200,11 @@ fn spans(args: &[String]) -> ExitCode {
     }
 }
 
-/// `tsqlfmt [--config FILE] [--stdin-filepath PATH] [FILE | -]`: format
+/// `sqp-fmt [--config FILE] [--stdin-filepath PATH] [FILE | -]`: format
 /// FILE (or stdin) to stdout. Batches that can't be formatted safely come
 /// out exactly as written.
 ///
-/// The configuration is `--config FILE`, else the first `tsqlfmt.toml` in
+/// The configuration is `--config FILE`, else the first `sqp-fmt.toml` in
 /// the formatted file's directory or one above it (for stdin: from
 /// `--stdin-filepath`'s directory, else the current directory), else the
 /// defaults. A bad configuration is an error: nothing is written to stdout.
@@ -235,24 +235,24 @@ fn format_cmd(args: &[String]) -> ExitCode {
         }
     }
     if file.is_some() && stdin_path.is_some() {
-        eprintln!("tsqlfmt: --stdin-filepath only applies when reading stdin");
+        eprintln!("sqp-fmt: --stdin-filepath only applies when reading stdin");
         return ExitCode::from(2);
     }
     let cfg = match &config {
-        Some(c) => tsqlfmt::Config::load(c),
+        Some(c) => sqp_fmt::Config::load(c),
         None => {
             let named = file.as_deref().or(stdin_path.as_deref());
             let dir = named
                 .and_then(Path::parent)
                 .map(Path::to_path_buf)
                 .unwrap_or_default();
-            tsqlfmt::Config::discover(&dir).map(|(c, _)| c)
+            sqp_fmt::Config::discover(&dir).map(|(c, _)| c)
         }
     };
     let cfg = match cfg {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("tsqlfmt: {e}");
+            eprintln!("sqp-fmt: {e}");
             return ExitCode::from(2);
         }
     };
@@ -265,10 +265,10 @@ fn format_cmd(args: &[String]) -> ExitCode {
         None => std::io::stdin().read_to_string(&mut src).map(|_| ()),
     };
     if let Err(e) = read {
-        eprintln!("tsqlfmt: {e}");
+        eprintln!("sqp-fmt: {e}");
         return ExitCode::FAILURE;
     }
-    let (out, _) = tsqlfmt::format_with(&src, &cfg);
+    let (out, _) = sqp_fmt::format_with(&src, &cfg);
     let mut stdout = std::io::stdout().lock();
     if stdout
         .write_all(out.as_bytes())

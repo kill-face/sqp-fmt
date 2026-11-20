@@ -2,7 +2,7 @@
 //! batches that can't be formatted.
 
 fn fmt(s: &str) -> String {
-    tsqlfmt::format(s).0
+    sqp_fmt::format(s).0
 }
 
 #[test]
@@ -46,7 +46,7 @@ fn mixed_line_endings_in_code_leave_the_file_alone() {
 #[test]
 fn unparsable_batch_is_verbatim_others_formatted() {
     let src = "SELECT  1\ngo\nselect ( from\ngo\nSELECT  2\n";
-    let (out, stats) = tsqlfmt::format(src);
+    let (out, stats) = sqp_fmt::format(src);
     assert_eq!(out, "select 1\ngo\nselect ( from\ngo\nselect 2\n");
     assert_eq!(stats.unparsed, 1);
     assert_eq!(stats.formatted, 2);

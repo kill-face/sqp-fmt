@@ -1,4 +1,4 @@
-# tsqlfmt
+# sqp-fmt
 
 A T-SQL formatter that only changes whitespace and case, built on a fork of
 [sqlparser-rs](https://github.com/apache/datafusion-sqlparser-rs). The target
@@ -6,7 +6,7 @@ style is in [STYLE.md](STYLE.md).
 
 ## Layout
 
-- `../datafusion-sqlparser-rs`: the parser fork (`origin` =
+- `../sqp-rs`: the parser fork (`origin` =
   [`kill-face/sqp-rs`](https://github.com/kill-face/sqp-rs), `upstream` = `apache/...`), worked on
   under the `tsql` bookmark. Each grammar fix is its own change with tests, so
   it can go upstream.
@@ -29,32 +29,32 @@ style is in [STYLE.md](STYLE.md).
   anything unknown keeps its layout.
 - `src/case.rs`: keyword / built-in function / system type case, deciding
   identifiers by the AST.
-- `src/config.rs`: the configuration file (`tsqlfmt.toml`): the schema (one
+- `src/config.rs`: the configuration file (`sqp-fmt.toml`): the schema (one
   struct per section, defaults = STYLE.md), discovery, loading, and the
   table of implemented values (anything else is rejected); `docs/config.md`
   is its reference.
 - `src/corpus.rs`: the `corpus` progress measure.
-- `src/main.rs`: the `tsqlfmt` command.
+- `src/main.rs`: the `sqp-fmt` command.
 
 ## Formatting
 
-`tsqlfmt [--config FILE] [--stdin-filepath PATH] [FILE | -]` formats FILE
-(or stdin) to stdout. The layout comes from the first `tsqlfmt.toml` in
+`sqp-fmt [--config FILE] [--stdin-filepath PATH] [FILE | -]` formats FILE
+(or stdin) to stdout. The layout comes from the first `sqp-fmt.toml` in
 FILE's directory or above it (for stdin: above `--stdin-filepath`'s
 directory, else the current one), or `--config FILE`; with none, the house
 style of [STYLE.md](STYLE.md). [docs/config.md](docs/config.md) has every
 key. A bad configuration is an error (exit code 2, the message on stderr
 points at the key, nothing on stdout).
 
-For conform.nvim, pass the buffer's path so the right `tsqlfmt.toml` is
+For conform.nvim, pass the buffer's path so the right `sqp-fmt.toml` is
 found:
 
 ```lua
 require("conform").setup({
-  formatters_by_ft = { sql = { "tsqlfmt" } },
+  formatters_by_ft = { sql = { "sqp-fmt" } },
   formatters = {
-    tsqlfmt = {
-      command = "tsqlfmt",
+    sqp-fmt = {
+      command = "sqp-fmt",
       args = { "--stdin-filepath", "$FILENAME" },
       stdin = true,
     },
@@ -102,8 +102,8 @@ files where formatting twice differs from formatting once (should be 0), the
 slowest file and the files with the biggest diffs. Golden tests: each
 `tests/golden/NAME.sql` must format to `NAME.expected.sql`, with
 `NAME.toml` as its configuration if there is one, else the defaults
-(`TSQLFMT_BLESS=1 cargo test` rewrites the expected files; review the
-diff). `tests/cli.rs` tests the command: finding `tsqlfmt.toml`, `--config`,
+(`SQP_FMT_BLESS=1 cargo test` rewrites the expected files; review the
+diff). `tests/cli.rs` tests the command: finding `sqp-fmt.toml`, `--config`,
 `--stdin-filepath`, configuration errors.
 
 ## Status
@@ -116,7 +116,7 @@ diff). `tests/cli.rs` tests the command: finding `tsqlfmt.toml`, `--config`,
 | 2026-11-19 | 414 / 510 (fork `tsql`, 20 changes; 476 / 510 with `require_semicolon_stmt_delimiter: false`) |
 | 2026-11-19 | 478 / 510 (harness: optional semicolons on, `go;`, `GO` inside comments/strings ignored). The 32 left: 30 placeholder templates that aren't valid SQL (`values ();`, empty `from (values )`, `check ()`), one file of CREATE LOGIN / USER … FOR LOGIN and one of ALTER DATABASE … SET and CREATE DATABASE file lists |
 
-Span audit (`tsqlfmt spans`, same corpus, 1343 parsed batches, 1777
+Span audit (`sqp-fmt spans`, same corpus, 1343 parsed batches, 1777
 top-level statements, 298605 nested nodes, 687211 tokens):
 
 | Date | Tokens outside statement spans | Empty spans | Findings |
@@ -124,7 +124,7 @@ top-level statements, 298605 nested nodes, 687211 tokens):
 | 2026-11-19 | 153712 (22.37%) | 3364 | 15166 in 117 groups (fork `tsql` before the span work) |
 | 2026-11-19 | 41 (0.01%) | 0 | 96 in 5 groups (fork `tsql` + 18 span changes): the `USE` keyword (41 statements, 2 checks each), the `)` of table hints (12), `WITHIN GROUP (...)` (1, 2 checks) |
 
-Formatter (`tsqlfmt corpus`, same corpus: 510 files, 65365 lines; the
+Formatter (`sqp-fmt corpus`, same corpus: 510 files, 65365 lines; the
 largest file, 15539 lines / 1.4 MB, formats in about
 0.33 s). One generated seed file (12712 lines of `values` rows written with
 upper-case `NULL` and trailing commas) accounts for most changed lines; the
@@ -135,7 +135,7 @@ last column leaves it out.
 | 2026-11-19 | 317 / 510 | 49825 / 65365 (76.23%) | 0 | 0 | 49787 / 52653 (94.56%) | Core: printer, safety net, case; source layout kept, statements at column 0 |
 | 2026-11-19 | 443 / 510 | 52292 / 65365 (80.00%) | 0 | 0 | 52253 / 52653 (99.24%) | Statement families: select / from / join / where, CTEs, subqueries, insert / values / update / delete / merge, case, create table / index / alter table, procedures / functions / views / triggers, declare / set, if / while / try blocks (STYLE.md rules R1-R24, R27) |
 | 2026-11-19 | 417 / 510 | 51995 / 65365 (79.55%) | 0 | 0 | 51956 / 52653 (98.68%) | STYLE.md changes 1 and 2 (boolean blocks, window blocks; R25, R26). The changed lines left: the two changes (~320 lines), blank-line runs collapsed (~100), corpus inconsistencies where the majority rule wins (inline named constraints, trailing-comma lists, misaligned columns, `merge … on` indented), and the generated seed file |
-| 2026-11-19 | 417 / 510 | 51995 / 65365 (79.55%) | 0 | 0 | 51956 / 52653 (98.68%) | Configuration file (`tsqlfmt.toml`, docs/config.md); no file = the same output as before, byte for byte. A window or group written over several lines now breaks the list or `case` around it (none in the test bed) |
+| 2026-11-19 | 417 / 510 | 51995 / 65365 (79.55%) | 0 | 0 | 51956 / 52653 (98.68%) | Configuration file (`sqp-fmt.toml`, docs/config.md); no file = the same output as before, byte for byte. A window or group written over several lines now breaks the list or `case` around it (none in the test bed) |
 
 ## Decisions
 

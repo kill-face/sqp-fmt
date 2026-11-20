@@ -1,29 +1,29 @@
-# Configuration: `tsqlfmt.toml`
+# Configuration: `sqp-fmt.toml`
 
 Every layout choice in [STYLE.md](../STYLE.md) can be set per construct in a
-`tsqlfmt.toml`. Without the file (or with an empty one) tsqlfmt formats
+`sqp-fmt.toml`. Without the file (or with an empty one) sqp-fmt formats
 exactly as STYLE.md describes: every key's default is today's house style.
 
 ## Finding the file
 
-- `tsqlfmt FILE`: the first `tsqlfmt.toml` in FILE's directory or a
+- `sqp-fmt FILE`: the first `sqp-fmt.toml` in FILE's directory or a
   directory above it.
-- `tsqlfmt` (stdin): the same search from the directory of
+- `sqp-fmt` (stdin): the same search from the directory of
   `--stdin-filepath PATH` (the path the buffer will be saved to; it needn't
   exist), else from the current directory. Editors pass the buffer's path
   this way, as with rustfmt's and prettier's `--stdin-filepath`.
 - `--config FILE` uses FILE and skips the search.
 - The nearest file is the whole configuration: files further up are not
   merged in.
-- `tsqlfmt corpus` uses `--config FILE` or the defaults; it doesn't search.
+- `sqp-fmt corpus` uses `--config FILE` or the defaults; it doesn't search.
 
-A configuration error stops tsqlfmt before it writes anything (exit code 2)
+A configuration error stops sqp-fmt before it writes anything (exit code 2)
 with a message that points at the key:
 
 ```text
-tsqlfmt: proj/tsqlfmt.toml:3:1: unknown field `warp`, expected one of `wrap`, `keep_line_breaks`, `partition_by`, `order_by`, `frame`
-tsqlfmt: proj/tsqlfmt.toml:2:8: unknown variant `sometimes`, expected one of `never`, `if_long`, `chop_if_long`, `always`
-tsqlfmt: proj/tsqlfmt.toml:2:8: exists.wrap = "never" is not implemented yet for exists.wrap (implemented: "always")
+sqp-fmt: proj/sqp-fmt.toml:3:1: unknown field `warp`, expected one of `wrap`, `keep_line_breaks`, `partition_by`, `order_by`, `frame`
+sqp-fmt: proj/sqp-fmt.toml:2:8: unknown variant `sometimes`, expected one of `never`, `if_long`, `chop_if_long`, `always`
+sqp-fmt: proj/sqp-fmt.toml:2:8: exists.wrap = "never" is not implemented yet for exists.wrap (implemented: "always")
 ```
 
 Unknown keys and sections, values of the wrong type, out-of-range numbers
@@ -35,7 +35,7 @@ ignored. Keys can be written as sections (`[where.groups]`), dotted keys
 ## Vocabulary
 
 The names follow JetBrains' code-style settings (`style/jetbrains-codestyle.xml`
-is the scheme tsqlfmt's house style starts from).
+is the scheme sqp-fmt's house style starts from).
 
 ### `wrap`
 
@@ -47,14 +47,14 @@ is the scheme tsqlfmt's house style starts from).
 | `"always"` | Wrap always / Chop always | Every element on a line of its own. |
 
 For a parenthesised construct, "chopped" means the **block** layout
-tsqlfmt already has: `(` ends its line, the contents are indented 2 from the
+sqp-fmt already has: `(` ends its line, the contents are indented 2 from the
 `(` column, `)` is on its own line under the `(`. That one layout stands for
 JetBrains' separate "new line after `(`", "place `)` on new line" and
-"align when multiline" options, which tsqlfmt doesn't split up (yet).
+"align when multiline" options, which sqp-fmt doesn't split up (yet).
 
 ### `keep_line_breaks`
 
-JetBrains' "Keep when reformatting: line breaks". In tsqlfmt the author's
+JetBrains' "Keep when reformatting: line breaks". In sqp-fmt the author's
 line break is a signal:
 
 - in a **list** (select items, arguments, rows): a line break between

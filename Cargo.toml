@@ -1,16 +1,16 @@
 [package]
-name = "tsqlfmt"
+name = "sqp-fmt"
 version = "0.1.0"
 edition = "2024"
-description = "T-SQL formatter that only changes whitespace and keyword case"
+description = "SQL formatter for the dialects sqlparser-rs parses; changes only whitespace and keyword case"
 license = "MIT"
 
 [dependencies]
-# Fork of apache/datafusion-sqlparser-rs with the T-SQL grammar gaps filled.
+# sqp-rs: fork of apache/datafusion-sqlparser-rs with grammar and span fixes.
 # Path dependency while both are developed side by side; switch to the git
-# fork (kill-face/datafusion-sqlparser-rs, bookmark `tsql`) for Nix builds.
-sqlparser = { path = "../datafusion-sqlparser-rs", features = ["visitor"] }
-# The configuration file (tsqlfmt.toml).
+# fork (kill-face/sqp-rs, branch main) for Nix builds.
+sqlparser = { path = "../sqp-rs", features = ["visitor"] }
+# The configuration file (sqp-fmt.toml).
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.2.1"
 

@@ -1,5 +1,5 @@
 {
-  description = "tsqlfmt: T-SQL formatter";
+  description = "sqp-fmt: T-SQL formatter";
 
   inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
 

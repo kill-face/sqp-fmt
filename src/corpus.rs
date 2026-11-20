@@ -1,8 +1,8 @@
-//! `tsqlfmt corpus [--config FILE] [--diff FILE] [--top N] <path>...`: format
+//! `sqp-fmt corpus [--config FILE] [--diff FILE] [--top N] <path>...`: format
 //! every .sql file in memory and report how much changed, the safety-net
 //! fallbacks and idempotency failures. This is the progress measure for the
 //! formatter. The configuration is `--config FILE` or the defaults (no
-//! `tsqlfmt.toml` discovery).
+//! `sqp-fmt.toml` discovery).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -16,14 +16,14 @@ pub fn run(args: &[String]) -> ExitCode {
     let mut top = 15;
     let mut roots = Vec::new();
     let mut verbose = false;
-    let mut cfg = tsqlfmt::Config::default();
+    let mut cfg = sqp_fmt::Config::default();
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--config" => match it.next().map(|p| tsqlfmt::Config::load(Path::new(p))) {
+            "--config" => match it.next().map(|p| sqp_fmt::Config::load(Path::new(p))) {
                 Some(Ok(c)) => cfg = c,
                 Some(Err(e)) => {
-                    eprintln!("tsqlfmt: {e}");
+                    eprintln!("sqp-fmt: {e}");
                     return ExitCode::from(2);
                 }
                 None => return usage(),
@@ -45,12 +45,12 @@ pub fn run(args: &[String]) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        let (out, stats) = tsqlfmt::format_with(&src, &cfg);
+        let (out, stats) = sqp_fmt::format_with(&src, &cfg);
         print!("{}", unified(&f, &src, &out));
         for (line, msg) in &stats.problems {
             eprintln!("{f}:{line}: {msg}");
         }
-        let (again, _) = tsqlfmt::format_with(&out, &cfg);
+        let (again, _) = sqp_fmt::format_with(&out, &cfg);
         if again != out {
             eprintln!("{f}: not idempotent; second pass:");
             eprint!("{}", unified(&f, &out, &again));
@@ -65,7 +65,7 @@ pub fn run(args: &[String]) -> ExitCode {
         collect(Path::new(r), &mut files);
     }
 
-    let mut total = tsqlfmt::Stats::default();
+    let mut total = sqp_fmt::Stats::default();
     let (mut lines, mut unchanged_lines, mut unchanged_files) = (0usize, 0usize, 0usize);
     let mut changed: Vec<(usize, PathBuf)> = Vec::new();
     let mut not_idempotent = Vec::new();
@@ -78,7 +78,7 @@ pub fn run(args: &[String]) -> ExitCode {
             continue;
         };
         let t = Instant::now();
-        let (out, stats) = tsqlfmt::format_with(&src, &cfg);
+        let (out, stats) = sqp_fmt::format_with(&src, &cfg);
         let took = t.elapsed();
         if took > slowest.0 {
             slowest = (took, file.clone());
@@ -93,7 +93,7 @@ pub fn run(args: &[String]) -> ExitCode {
         } else {
             changed.push((a.len().max(b.len()) - same, file.clone()));
         }
-        let (again, _) = tsqlfmt::format_with(&out, &cfg);
+        let (again, _) = sqp_fmt::format_with(&out, &cfg);
         if again != out {
             not_idempotent.push(file.clone());
         }
