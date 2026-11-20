@@ -1,0 +1,3 @@
+keyword_case = "as_is"
+function_case = "upper"
+type_case = "lower"

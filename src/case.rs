@@ -1,332 +1,110 @@
-//! Keyword, built-in function and system type case.
+//! Keyword, function and type case.
 //!
-//! A word is an identifier when it starts an `Ident` of the AST: those are
-//! left as written (even `Status`, `Name`, `Value`), except the names of
-//! built-in functions, system data types and `@@` system functions, which
-//! are cased like keywords. Every other unquoted word is a keyword (or a
-//! type or function name that the grammar knows) and is cased if it's one of
-//! sqlparser's keywords or on the lists below; anything else is left alone.
-//! Keywords, functions and types each take their own setting
-//! (`keyword_case`, `function_case`, `type_case`; lower case by default).
+//! What a word is comes from the AST wherever the AST says it:
+//!
+//! - A word that starts an `Ident` is an identifier, left as written (even
+//!   `Status`, `Name`, `Value`).
+//! - A function call's name (`Expr::Function`) is a function name
+//!   (`function_case`) when it's unqualified; a qualified name
+//!   (`dbo.fnTotal`) names a schema's function, and is an identifier. So is
+//!   the keyword of the functions the grammar has a syntax of its own for
+//!   (`cast`, `try_cast`, `convert`, `extract`, `substring`, `trim`,
+//!   `position`, `overlay`, `ceil`, `floor`), and the standard's niladic
+//!   functions written without parentheses (`current_timestamp`, ...).
+//! - The name of a data type (`DataType`, in a column definition, cast,
+//!   convert, declaration, parameter, return type or typed literal) is a
+//!   type name (`type_case`); its parameters (`max` in `varchar(max)`)
+//!   are not.
+//! - Every other word the tokenizer knows as a keyword is a keyword
+//!   (`keyword_case`); anything else is left alone.
+//!
+//! Lists remain, per dialect, only for what the AST can't tell (see each):
+//! built-in types it has no `DataType` for, T-SQL date parts and `@@`
+//! functions, and T-SQL keywords sqlparser's keyword list lacks.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 
 use sqlparser::ast::*;
+use sqlparser::dialect::GenericDialect;
 use sqlparser::keywords::Keyword;
-use sqlparser::tokenizer::{Location, Token};
+use sqlparser::tokenizer::{Location, Span, Token, Tokenizer};
 
 use crate::config::{Config, WordCase};
-use crate::layout::Layout;
+use crate::layout::{Layout, Tok};
 
-/// T-SQL built-in functions (scalar, aggregate, ranking, analytic, rowset).
-pub const BUILTIN_FUNCTIONS: &[&str] = &[
-    // aggregate
-    "approx_count_distinct",
-    "approx_percentile_cont",
-    "approx_percentile_disc",
-    "avg",
-    "checksum_agg",
-    "count",
-    "count_big",
-    "grouping",
-    "grouping_id",
-    "max",
-    "min",
-    "stdev",
-    "stdevp",
-    "string_agg",
-    "sum",
-    "var",
-    "varp",
-    // analytic and ranking
-    "cume_dist",
-    "dense_rank",
-    "first_value",
-    "lag",
-    "last_value",
-    "lead",
-    "ntile",
-    "percent_rank",
-    "percentile_cont",
-    "percentile_disc",
-    "rank",
-    "row_number",
-    // conversion
-    "cast",
-    "convert",
-    "parse",
-    "try_cast",
-    "try_convert",
-    "try_parse",
-    // date and time
-    "current_timestamp",
-    "current_timezone",
-    "current_timezone_id",
-    "date_bucket",
-    "dateadd",
-    "datediff",
-    "datediff_big",
-    "datefromparts",
-    "datename",
-    "datepart",
-    "datetime2fromparts",
-    "datetimefromparts",
-    "datetimeoffsetfromparts",
-    "datetrunc",
-    "day",
-    "eomonth",
-    "getdate",
-    "getutcdate",
-    "isdate",
-    "month",
-    "smalldatetimefromparts",
-    "switchoffset",
-    "sysdatetime",
-    "sysdatetimeoffset",
-    "sysutcdatetime",
-    "timefromparts",
-    "todatetimeoffset",
-    "year",
-    // logical
-    "choose",
-    "greatest",
-    "iif",
-    "least",
-    // math
-    "abs",
-    "acos",
-    "asin",
-    "atan",
-    "atn2",
-    "ceiling",
-    "cos",
-    "cot",
-    "degrees",
-    "exp",
-    "floor",
-    "log",
-    "log10",
-    "pi",
-    "power",
-    "radians",
-    "rand",
-    "round",
-    "sign",
-    "sin",
-    "sqrt",
-    "square",
-    "tan",
-    // string
-    "ascii",
-    "char",
-    "charindex",
-    "concat",
-    "concat_ws",
-    "difference",
-    "format",
-    "left",
-    "len",
-    "lower",
-    "ltrim",
-    "nchar",
-    "patindex",
-    "quotename",
-    "replace",
-    "replicate",
-    "reverse",
-    "right",
-    "rtrim",
-    "soundex",
-    "space",
-    "str",
-    "string_escape",
-    "string_split",
-    "stuff",
-    "substring",
-    "translate",
-    "trim",
-    "unicode",
-    "upper",
-    // json and xml
-    "isjson",
-    "json_array",
-    "json_modify",
-    "json_object",
-    "json_query",
-    "json_value",
-    "openjson",
-    "openxml",
-    // system, metadata, security
-    "app_name",
-    "binary_checksum",
-    "checksum",
-    "col_length",
-    "col_name",
-    "columnproperty",
-    "columns_updated",
-    "compress",
-    "connectionproperty",
-    "context_info",
-    "current_request_id",
-    "current_transaction_id",
-    "current_user",
-    "cursor_status",
-    "databasepropertyex",
-    "datalength",
-    "db_id",
-    "db_name",
-    "decompress",
-    "error_line",
-    "error_message",
-    "error_number",
-    "error_procedure",
-    "error_severity",
-    "error_state",
-    "eventdata",
-    "formatmessage",
-    "get_filestream_transaction_context",
-    "getansinull",
-    "has_dbaccess",
-    "has_perms_by_name",
-    "hashbytes",
-    "host_id",
-    "host_name",
-    "ident_current",
-    "ident_incr",
-    "ident_seed",
-    "identity",
-    "index_col",
-    "indexkey_property",
-    "indexproperty",
-    "is_member",
-    "is_rolemember",
-    "is_srvrolemember",
-    "isnull",
-    "isnumeric",
-    "min_active_rowversion",
-    "newid",
-    "newsequentialid",
-    "nullif",
-    "coalesce",
-    "object_definition",
-    "object_id",
-    "object_name",
-    "object_schema_name",
-    "objectproperty",
-    "objectpropertyex",
-    "opendatasource",
-    "openquery",
-    "openrowset",
-    "original_login",
-    "parsename",
-    "permissions",
-    "pwdcompare",
-    "pwdencrypt",
-    "rowcount_big",
-    "schema_id",
-    "schema_name",
-    "scope_identity",
-    "serverproperty",
-    "session_context",
-    "session_user",
-    "sessionproperty",
-    "sql_variant_property",
-    "stats_date",
-    "suser_id",
-    "suser_name",
-    "suser_sid",
-    "suser_sname",
-    "system_user",
-    "trigger_nestlevel",
-    "type_id",
-    "type_name",
-    "typeproperty",
-    "user_id",
-    "user_name",
-    "xact_state",
-];
-
-/// System data types.
-pub const SYSTEM_TYPES: &[&str] = &[
-    "bigint",
-    "binary",
-    "bit",
-    "char",
+/// T-SQL system data types ("Data types (Transact-SQL)") that sqlparser
+/// has no `DataType` for: it parses them as `DataType::Custom`, a name like
+/// any user-defined type's, so only the name says they're built in.
+const MSSQL_CUSTOM_TYPES: &[&str] = &[
     "cursor",
-    "date",
-    "datetime",
     "datetime2",
     "datetimeoffset",
-    "decimal",
-    "float",
     "geography",
     "geometry",
     "hierarchyid",
     "image",
-    "int",
     "money",
-    "nchar",
     "ntext",
-    "numeric",
-    "nvarchar",
-    "real",
     "rowversion",
     "smalldatetime",
-    "smallint",
     "smallmoney",
     "sql_variant",
     "sysname",
-    "table",
-    "text",
-    "time",
-    "timestamp",
-    "tinyint",
     "uniqueidentifier",
-    "varbinary",
-    "varchar",
     "xml",
 ];
 
-/// `@@` system functions.
-pub const SYSTEM_VARIABLES: &[&str] = &[
-    "@@connections",
-    "@@cpu_busy",
-    "@@cursor_rows",
-    "@@datefirst",
-    "@@dbts",
-    "@@error",
-    "@@fetch_status",
-    "@@identity",
-    "@@idle",
-    "@@io_busy",
-    "@@langid",
-    "@@language",
-    "@@lock_timeout",
-    "@@max_connections",
-    "@@max_precision",
-    "@@microsoftversion",
-    "@@nestlevel",
-    "@@options",
-    "@@pack_received",
-    "@@pack_sent",
-    "@@packet_errors",
-    "@@procid",
-    "@@remserver",
-    "@@rowcount",
-    "@@servername",
-    "@@servicename",
-    "@@spid",
-    "@@textsize",
-    "@@timeticks",
-    "@@total_errors",
-    "@@total_read",
-    "@@total_write",
-    "@@trancount",
-    "@@version",
+/// PostgreSQL built-in types ("Data Types", Table 8.1; range types, 8.17;
+/// object identifier types, 8.19) that sqlparser parses as
+/// `DataType::Custom`, for the same reason.
+const POSTGRESQL_CUSTOM_TYPES: &[&str] = &[
+    "bigserial",
+    "box",
+    "cidr",
+    "circle",
+    "daterange",
+    "inet",
+    "int4range",
+    "int8range",
+    "line",
+    "lseg",
+    "macaddr",
+    "macaddr8",
+    "money",
+    "name",
+    "numrange",
+    "oid",
+    "path",
+    "pg_lsn",
+    "pg_snapshot",
+    "point",
+    "polygon",
+    "regtype",
+    "serial",
+    "smallserial",
+    "tsrange",
+    "tstzrange",
+    "txid_snapshot",
+    "xml",
 ];
 
-/// Date parts, as the first argument of `dateadd` and friends.
+/// The SQL standard's niladic functions, written without parentheses: to
+/// the AST some are column references (`Expr::Identifier`).
+const NILADIC_FUNCTIONS: &[&str] = &[
+    "current_date",
+    "current_time",
+    "current_timestamp",
+    "current_user",
+    "localtime",
+    "localtimestamp",
+    "session_user",
+    "system_user",
+];
+
+/// T-SQL date parts ("DATEADD (Transact-SQL)": datepart), as the first
+/// argument of the functions below: keywords to T-SQL, but parsed as a
+/// column reference.
 const DATE_PARTS: &[&str] = &[
     "year",
     "yy",
@@ -380,126 +158,6 @@ const DATE_FUNCTIONS: &[&str] = &[
     "date_bucket",
 ];
 
-/// Words outside identifiers that are T-SQL keywords sqlparser doesn't list.
-const EXTRA_KEYWORDS: &[&str] = &[
-    "nocount",
-    "xact_abort",
-    "ansi_nulls",
-    "quoted_identifier",
-    "ansi_padding",
-    "ansi_warnings",
-    "arithabort",
-    "concat_null_yields_null",
-    "numeric_roundabort",
-    "identity_insert",
-    "datefirst",
-    "dateformat",
-    "deadlock_priority",
-    "lock_timeout",
-    "rowcount",
-    "textsize",
-    "language",
-    "nonclustered",
-    "clustered",
-    "columnstore",
-    "readonly",
-    "schemabinding",
-    "recompile",
-    "encryption",
-    "nolock",
-    "readuncommitted",
-    "readcommitted",
-    "repeatableread",
-    "serializable",
-    "snapshot",
-    "updlock",
-    "rowlock",
-    "paglock",
-    "tablock",
-    "tablockx",
-    "holdlock",
-    "xlock",
-    "readpast",
-    "nowait",
-    "maxdop",
-    "optimize",
-    "unknown",
-    "fillfactor",
-    "pad_index",
-    "sort_in_tempdb",
-    "ignore_dup_key",
-    "statistics_norecompute",
-    "allow_row_locks",
-    "allow_page_locks",
-    "online",
-    "data_compression",
-    "nocheck",
-    "persisted",
-    "sparse",
-    "rowguidcol",
-    "filestream",
-    "output",
-    "out",
-    "inserted",
-    "deleted",
-    "try",
-    "catch",
-    "tran",
-    "raiserror",
-    "waitfor",
-    "delay",
-    "nowait",
-    "goto",
-    "openjson",
-    "cross",
-    "apply",
-    "pivot",
-    "unpivot",
-    "merge",
-    "matched",
-    "target",
-    "source",
-    "throw",
-    "print",
-    "exec",
-    "execute",
-    "proc",
-    "procedure",
-    "returns",
-    "return",
-    "begin",
-    "end",
-];
-
-fn set(list: &[&str]) -> HashSet<String> {
-    list.iter().map(|s| s.to_string()).collect()
-}
-
-struct Lists {
-    functions: HashSet<String>,
-    types: HashSet<String>,
-    vars: HashSet<String>,
-    extra: HashSet<String>,
-}
-
-fn lists() -> &'static Lists {
-    static L: std::sync::OnceLock<Lists> = std::sync::OnceLock::new();
-    L.get_or_init(|| Lists {
-        functions: set(BUILTIN_FUNCTIONS),
-        types: set(SYSTEM_TYPES),
-        vars: set(SYSTEM_VARIABLES),
-        extra: set(EXTRA_KEYWORDS),
-    })
-}
-
-/// Identifier starts, and the identifiers that are nevertheless lower-cased
-/// (built-in function names, system types).
-#[derive(Default)]
-struct Idents {
-    idents: HashSet<Location>,
-    lower: HashMap<Location, Class>,
-}
-
 /// Which case setting applies to a word.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Class {
@@ -508,37 +166,74 @@ enum Class {
     Type,
 }
 
-impl Idents {
-    fn data_type(&mut self, dt: &DataType) {
+/// Where a data type starts: right after the end of a node (skipping a
+/// token, like the `as` of a cast), or before a token.
+#[derive(Debug, Clone, Copy)]
+enum From {
+    After(Location, Option<&'static str>),
+    /// Right before a token (all of the type).
+    Before(Location),
+    /// After the first `word` at or after a location.
+    AfterWord(Location, &'static str),
+}
+
+/// What the AST says about the words of a batch.
+#[derive(Default)]
+struct Words {
+    /// Starts of identifiers.
+    idents: HashSet<Location>,
+    /// Identifiers cased all the same: function names, built-in type names
+    /// the AST only knows as names.
+    marked: HashMap<Location, Class>,
+    /// Keyword-functions (`cast`, `extract`, ...): their first token.
+    functions: Vec<Location>,
+    /// Data types and where they start.
+    types: Vec<(From, DataType)>,
+    /// The dialect's built-in types that parse as `DataType::Custom`.
+    custom_types: &'static [&'static str],
+    mssql: bool,
+}
+
+impl Words {
+    fn data_type(&mut self, from: From, dt: &DataType) {
         if let DataType::Custom(name, _) = dt
             && let [ObjectNamePart::Identifier(id)] = name.0.as_slice()
             && id.quote_style.is_none()
-            && lists().types.contains(&id.value.to_ascii_lowercase())
+            && self
+                .custom_types
+                .contains(&id.value.to_ascii_lowercase().as_str())
         {
-            self.lower.insert(id.span.start, Class::Type);
+            self.marked.insert(id.span.start, Class::Type);
+        }
+        self.types.push((from, dt.clone()));
+        // A table type's columns (`declare @t table (...)`, `returns @t
+        // table (...)`).
+        if let DataType::Table(Some(cols)) = dt {
+            self.columns(cols);
         }
     }
 
-    fn function_name(&mut self, name: &ObjectName) {
-        if let [ObjectNamePart::Identifier(id)] = name.0.as_slice()
-            && id.quote_style.is_none()
-            && lists().functions.contains(&id.value.to_ascii_lowercase())
-        {
-            self.lower.insert(id.span.start, Class::Function);
+    fn columns(&mut self, cols: &[ColumnDef]) {
+        for c in cols {
+            self.data_type(after(c.name.span, None), &c.data_type);
         }
     }
 }
 
-impl Visitor for Idents {
+fn after(span: Span, skip: Option<&'static str>) -> From {
+    From::After(span.end, skip)
+}
+
+impl Visitor for Words {
     type Break = ();
 
     fn pre_visit_ident(&mut self, ident: &Ident) -> ControlFlow<()> {
         if ident.span.start.line > 0 {
             self.idents.insert(ident.span.start);
-            if ident.quote_style.is_none()
-                && lists().vars.contains(&ident.value.to_ascii_lowercase())
-            {
-                self.lower.insert(ident.span.start, Class::Function);
+            // T-SQL reserves `@@` names for its system functions
+            // ("Database identifiers": "names that start with @@").
+            if self.mssql && ident.quote_style.is_none() && ident.value.starts_with("@@") {
+                self.marked.insert(ident.span.start, Class::Function);
             }
         }
         ControlFlow::Continue(())
@@ -547,35 +242,73 @@ impl Visitor for Idents {
     fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
         match expr {
             Expr::Function(f) => {
-                self.function_name(&f.name);
-                let name = f.name.to_string().to_ascii_lowercase();
-                if DATE_FUNCTIONS.contains(&name.as_str())
-                    && let FunctionArguments::List(list) = &f.args
-                    && let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Identifier(id)))) =
-                        list.args.first()
+                if let [ObjectNamePart::Identifier(id)] = f.name.0.as_slice()
                     && id.quote_style.is_none()
-                    && DATE_PARTS.contains(&id.value.to_ascii_lowercase().as_str())
                 {
-                    self.lower.insert(id.span.start, Class::Keyword);
+                    self.marked.insert(id.span.start, Class::Function);
+                    let name = id.value.to_ascii_lowercase();
+                    if self.mssql
+                        && DATE_FUNCTIONS.contains(&name.as_str())
+                        && let FunctionArguments::List(list) = &f.args
+                        && let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Identifier(
+                            part,
+                        )))) = list.args.first()
+                        && part.quote_style.is_none()
+                        && DATE_PARTS.contains(&part.value.to_ascii_lowercase().as_str())
+                    {
+                        self.marked.insert(part.span.start, Class::Keyword);
+                    }
                 }
             }
-            Expr::Identifier(id) => {
-                // Niladic built-ins written without parentheses.
-                let v = id.value.to_ascii_lowercase();
+            Expr::Identifier(id)
                 if id.quote_style.is_none()
-                    && matches!(
-                        v.as_str(),
-                        "current_timestamp" | "current_user" | "session_user" | "system_user"
-                    )
-                {
-                    self.lower.insert(id.span.start, Class::Function);
+                    && NILADIC_FUNCTIONS.contains(&id.value.to_ascii_lowercase().as_str()) =>
+            {
+                self.marked.insert(id.span.start, Class::Function);
+            }
+            Expr::Cast {
+                kind,
+                expr: inner,
+                data_type,
+                ..
+            } => {
+                let skip = match kind {
+                    CastKind::DoubleColon => "::",
+                    _ => {
+                        self.functions.push(expr.span().start);
+                        "as"
+                    }
+                };
+                self.data_type(after(inner.span(), Some(skip)), data_type);
+            }
+            Expr::Convert {
+                expr: inner,
+                data_type,
+                target_before_value,
+                ..
+            } => {
+                self.functions.push(expr.span().start);
+                if let Some(dt) = data_type {
+                    let from = if *target_before_value {
+                        // `convert(type, value)`: after the `(`.
+                        From::AfterWord(expr.span().start, "(")
+                    } else {
+                        after(inner.span(), Some(","))
+                    };
+                    self.data_type(from, dt);
                 }
             }
-            Expr::Cast { data_type, .. } => self.data_type(data_type),
-            Expr::Convert {
-                data_type: Some(dt),
-                ..
-            } => self.data_type(dt),
+            Expr::Extract { .. }
+            | Expr::Ceil { .. }
+            | Expr::Floor { .. }
+            | Expr::Position { .. }
+            | Expr::Substring { .. }
+            | Expr::Trim { .. }
+            | Expr::Overlay { .. } => self.functions.push(expr.span().start),
+            Expr::TypedString(ts) => {
+                // The span is the literal's; the type is right before it.
+                self.data_type(From::Before(ts.value.span.start), &ts.data_type)
+            }
             _ => {}
         }
         ControlFlow::Continue(())
@@ -583,22 +316,41 @@ impl Visitor for Idents {
 
     fn pre_visit_statement(&mut self, stmt: &Statement) -> ControlFlow<()> {
         match stmt {
-            Statement::CreateTable(ct) => {
-                for c in &ct.columns {
-                    self.data_type(&c.data_type);
+            Statement::CreateTable(ct) => self.columns(&ct.columns),
+            Statement::CreateType {
+                representation: Some(r),
+                ..
+            } => match r {
+                UserDefinedTypeRepresentation::Table { columns, .. } => self.columns(columns),
+                UserDefinedTypeRepresentation::Composite { attributes } => {
+                    for a in attributes {
+                        self.data_type(after(a.name.span, None), &a.data_type);
+                    }
+                }
+                _ => {}
+            },
+            Statement::CreateSequence {
+                name,
+                sequence_options,
+                ..
+            } => {
+                for o in sequence_options {
+                    if let SequenceOptions::DataType(dt) = o {
+                        self.data_type(From::AfterWord(name.span().end, "as"), dt);
+                    }
                 }
             }
             Statement::AlterTable(at) => {
                 for op in &at.operations {
                     if let AlterTableOperation::AddColumn { column_def, .. } = op {
-                        self.data_type(&column_def.data_type);
+                        self.columns(std::slice::from_ref(column_def));
                     }
                 }
             }
             Statement::Declare { stmts, .. } => {
                 for d in stmts {
-                    if let Some(dt) = &d.data_type {
-                        self.data_type(dt);
+                    if let (Some(dt), Some(name)) = (&d.data_type, d.names.last()) {
+                        self.data_type(after(name.span, Some("as")), dt);
                     }
                 }
             }
@@ -607,15 +359,24 @@ impl Visitor for Idents {
                 ..
             } => {
                 for p in params {
-                    self.data_type(&p.data_type);
+                    self.data_type(after(p.name.span, Some("as")), &p.data_type);
                 }
             }
             Statement::CreateFunction(f) => {
                 for a in f.args.iter().flatten() {
-                    self.data_type(&a.data_type);
+                    if let Some(name) = &a.name {
+                        self.data_type(after(name.span, None), &a.data_type);
+                    }
                 }
-                if let Some(FunctionReturnType::DataType(dt)) = &f.return_type {
-                    self.data_type(dt);
+                if let Some(FunctionReturnType::DataType(dt) | FunctionReturnType::SetOf(dt)) =
+                    &f.return_type
+                {
+                    // After `returns` (`returns setof`).
+                    let end = f.args.iter().flatten().last().map_or(f.name.span(), |a| {
+                        a.name.as_ref().map_or(Span::empty(), |n| n.span)
+                    });
+                    self.types
+                        .push((From::AfterWord(end.end, "returns"), dt.clone()));
                 }
             }
             _ => {}
@@ -624,56 +385,189 @@ impl Visitor for Idents {
     }
 }
 
-/// Sets the case of keywords, built-in functions and system types in
-/// `l.toks` (`keyword_case`, `function_case`, `type_case`).
-///
-/// Identifiers are classed by the AST (a function name, a type name, a date
-/// part, an `@@` function). Other words are classed by name and position: a
-/// system type name is a type (but `table` only after a `@variable`, `xml`
-/// not after `for`, `time` not after `at`); a built-in function name right
-/// before `(` is a function (`cast(`, `convert(`; not `identity (1,1)`);
-/// every other keyword is a keyword.
+/// T-SQL keywords sqlparser's keyword list lacks: the grammar reads them as
+/// words, so the tokenizer doesn't mark them as keywords: SET options,
+/// table hints, index and column options, `goto`, the trigger tables.
+const MSSQL_EXTRA_KEYWORDS: &[&str] = &[
+    "allow_page_locks",
+    "allow_row_locks",
+    "ansi_nulls",
+    "ansi_padding",
+    "ansi_warnings",
+    "arithabort",
+    "concat_null_yields_null",
+    "data_compression",
+    "datefirst",
+    "deadlock_priority",
+    "deleted",
+    "filestream",
+    "fillfactor",
+    "goto",
+    "holdlock",
+    "ignore_dup_key",
+    "inserted",
+    "lock_timeout",
+    "maxdop",
+    "nocount",
+    "nolock",
+    "numeric_roundabort",
+    "online",
+    "pad_index",
+    "paglock",
+    "quoted_identifier",
+    "readcommitted",
+    "readpast",
+    "readuncommitted",
+    "recompile",
+    "repeatableread",
+    "rowcount",
+    "rowguidcol",
+    "rowlock",
+    "schemabinding",
+    "sort_in_tempdb",
+    "sparse",
+    "statistics_norecompute",
+    "tablock",
+    "tablockx",
+    "textsize",
+    "updlock",
+    "xact_abort",
+    "xlock",
+];
+
+/// The token range of a data type that starts at `from`: as many tokens as
+/// match the type's `Display`, case aside (at least one).
+fn type_range(
+    l: &Layout,
+    starts: &[Location],
+    from: From,
+    dt: &DataType,
+) -> Option<(usize, usize)> {
+    let n = l.toks.len();
+    let first_at = |loc: Location| starts.partition_point(|s| crate::build::loc_lt(*s, loc));
+    let is = |i: usize, s: &str| i < n && l.toks[i].text.eq_ignore_ascii_case(s);
+    let want: Vec<Token> = Tokenizer::new(&GenericDialect {}, &dt.to_string())
+        .tokenize()
+        .ok()?
+        .into_iter()
+        .filter(|t| !matches!(t, Token::Whitespace(_) | Token::EOF))
+        .collect();
+    let start = match from {
+        // The whole type must match then.
+        From::Before(loc) => first_at(loc).checked_sub(want.len())?,
+        From::After(loc, skip) => {
+            let i = first_at(loc);
+            if skip.is_some_and(|s| is(i, s)) {
+                i + 1
+            } else {
+                i
+            }
+        }
+        From::AfterWord(loc, word) => {
+            let i = (first_at(loc)..n).find(|&i| is(i, word))? + 1;
+            if is(i, "setof") { i + 1 } else { i }
+        }
+    };
+    let same = |t: &Tok, w: &Token| match (&t.token, w) {
+        (Token::Word(a), Token::Word(b)) => {
+            a.quote_style == b.quote_style && a.value.eq_ignore_ascii_case(&b.value)
+        }
+        (a, b) => a == b,
+    };
+    let len = want
+        .iter()
+        .zip(l.toks.get(start..)?)
+        .take_while(|(w, t)| same(t, w))
+        .count();
+    (len > 0).then(|| (start, start + len - 1))
+}
+
+/// Sets the case of keywords, function names and type names in `l.toks`
+/// (`keyword_case`, `function_case`, `type_case`).
 pub fn apply(l: &mut Layout, stmts: &[Statement], cfg: &Config) {
-    let mut ids = Idents::default();
+    let dialect = cfg.dialect_name();
+    let mut w = Words {
+        custom_types: match dialect {
+            "mssql" => MSSQL_CUSTOM_TYPES,
+            "postgresql" => POSTGRESQL_CUSTOM_TYPES,
+            _ => &[],
+        },
+        mssql: dialect == "mssql",
+        ..Words::default()
+    };
     for s in stmts {
-        let _ = s.visit(&mut ids);
+        let _ = s.visit(&mut w);
     }
-    let lists = lists();
-    for i in 0..l.toks.len() {
+    let n = l.toks.len();
+    let starts: Vec<Location> = l.toks.iter().map(|t| t.start).collect();
+    let mut class: Vec<Option<Class>> = vec![None; n];
+    let paren = |i: usize| matches!(l.toks.get(i).map(|t| &t.token), Some(Token::LParen));
+    for loc in &w.functions {
+        // The keyword starts the expression's span; but the spans of some
+        // (`extract`, `ceil`, `position`, ...) cover only what's inside the
+        // parentheses: then it's the word before the `(` around them.
+        let i = starts.partition_point(|s| crate::build::loc_lt(*s, *loc));
+        let k = if paren(i + 1) {
+            Some(i)
+        } else {
+            let mut depth = 0usize;
+            (0..i.min(n))
+                .rev()
+                .find(|&j| match l.toks[j].token {
+                    Token::RParen => {
+                        depth += 1;
+                        false
+                    }
+                    Token::LParen if depth == 0 => true,
+                    Token::LParen => {
+                        depth -= 1;
+                        false
+                    }
+                    _ => false,
+                })
+                .and_then(|j| j.checked_sub(1))
+        };
+        if let Some(k) = k
+            && k < n
+            && matches!(&l.toks[k].token, Token::Word(w) if w.quote_style.is_none())
+            && paren(k + 1)
+        {
+            class[k] = Some(Class::Function);
+        }
+    }
+    for (from, dt) in &w.types {
+        let Some((a, b)) = type_range(l, &starts, *from, dt) else {
+            continue;
+        };
+        let mut depth = 0usize;
+        for (t, c) in l.toks[a..=b].iter().zip(&mut class[a..=b]) {
+            match t.token {
+                Token::LParen => depth += 1,
+                Token::RParen => depth = depth.saturating_sub(1),
+                Token::Word(_) if depth == 0 && c.is_none() => *c = Some(Class::Type),
+                _ => {}
+            }
+        }
+    }
+    for i in 0..n {
         let t = &l.toks[i];
-        let Token::Word(w) = &t.token else { continue };
-        if w.quote_style.is_some() {
+        let Token::Word(word) = &t.token else {
+            continue;
+        };
+        if word.quote_style.is_some() {
             continue;
         }
-        let class = if ids.idents.contains(&t.start) {
-            ids.lower.get(&t.start).copied()
+        let class = if w.idents.contains(&t.start) {
+            w.marked.get(&t.start).copied()
+        } else if let Some(c) = class[i] {
+            Some(c)
+        } else if w.marked.get(&t.start) == Some(&Class::Keyword)
+            || word.keyword != Keyword::NoKeyword
+            || (w.mssql && MSSQL_EXTRA_KEYWORDS.contains(&word.value.to_ascii_lowercase().as_str()))
+        {
+            Some(Class::Keyword)
         } else {
-            let v = w.value.to_ascii_lowercase();
-            let prev = i.checked_sub(1).map(|p| &l.toks[p]);
-            let prev_is = |kw: &str| prev.is_some_and(|p| p.is_word(kw));
-            let prev_var = prev.is_some_and(
-                |p| matches!(&p.token, Token::Word(pw) if pw.quote_style.is_none() && pw.value.starts_with('@')),
-            );
-            let next_paren = matches!(l.toks.get(i + 1).map(|n| &n.token), Some(Token::LParen));
-            if lists.types.contains(&v)
-                && (v != "table" || prev_var)
-                && !(v == "xml" && prev_is("for"))
-                && !(v == "time" && prev_is("at"))
-            {
-                Some(Class::Type)
-            } else if (lists.functions.contains(&v) && next_paren && v != "identity")
-                || lists.vars.contains(&v)
-            {
-                Some(Class::Function)
-            } else if w.keyword != Keyword::NoKeyword
-                || lists.types.contains(&v)
-                || lists.functions.contains(&v)
-                || lists.extra.contains(&v)
-            {
-                Some(Class::Keyword)
-            } else {
-                None
-            }
+            None
         };
         let case = match class {
             Some(Class::Keyword) => cfg.keyword_case,
