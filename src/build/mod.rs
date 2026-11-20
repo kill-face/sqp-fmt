@@ -35,6 +35,7 @@ pub fn build(l: &mut Layout, stmts: &[Statement], cfg: &Config) {
         item: None,
         extend: Default::default(),
         exists_paren: None,
+        if_anchor: None,
         cfg,
         ctx: Ctx::Other,
         chain: None,
@@ -55,6 +56,9 @@ pub(crate) struct Builder<'a> {
     /// Where the `(` of an `exists` subquery goes, set by the condition
     /// being built (`if`, `where` chains).
     pub exists_paren: Option<Ind>,
+    /// The token an `if` lines up with instead of its own `if`: the `else`
+    /// of an `else if` kept on one line. Taken by the next `if`.
+    pub if_anchor: Option<usize>,
     pub cfg: &'a Config,
     /// The condition the expression being built is part of: its
     /// parenthesised `and` / `or` groups take that condition's `groups`

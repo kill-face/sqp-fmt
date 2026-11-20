@@ -144,9 +144,12 @@ impl Builder<'_> {
     }
 
     fn if_stmt(&mut self, s: &IfStatement, _r: R) {
-        let Some(if_tok) = self.att(&s.if_block.start_token) else {
+        let anchor = self.if_anchor.take();
+        let Some(own_if) = self.att(&s.if_block.start_token) else {
             return;
         };
+        // In `else if`, the body and the next `else` line up with the `else`.
+        let if_tok = anchor.unwrap_or(own_if);
         if let Some(c) = &s.if_block.condition
             && let Some(cr) = self.rng(c)
         {
@@ -169,7 +172,9 @@ impl Builder<'_> {
                 && !self.nl_before(ir.0)
                 && ir.0 == else_tok + 1
             {
+                self.if_anchor = Some(if_tok);
                 self.statement(inner);
+                self.if_anchor = None;
                 self.set(ir.0, Rule::Flat(Sp::One));
                 return;
             }

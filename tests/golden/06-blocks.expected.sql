@@ -1,8 +1,8 @@
 begin
     select 1
     begin
-    select 2
-end
+        select 2
+    end
 end
 begin try
     select 1 / 0
