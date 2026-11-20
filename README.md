@@ -7,7 +7,7 @@ style is in [STYLE.md](STYLE.md).
 ## Layout
 
 - `../datafusion-sqlparser-rs`: the parser fork (`origin` =
-  `kill-face/datafusion-sqlparser-rs`, `upstream` = `apache/...`), worked on
+  [`kill-face/sqp-rs`](https://github.com/kill-face/sqp-rs), `upstream` = `apache/...`), worked on
   under the `tsql` bookmark. Each grammar fix is its own change with tests, so
   it can go upstream.
 - `src/lib.rs`: splits a file into `GO` batches (SQLCMD `:r` / `:setvar`
