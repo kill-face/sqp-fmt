@@ -68,10 +68,12 @@ pub fn format_with(src: &str, cfg: &Config) -> (String, Stats) {
             format_batch(&lines[from..to], &off[from..to], from, cfg, out, stats);
         }
     };
+    // `GO` and `:` commands are sqlcmd's (T-SQL's client).
+    let sqlcmd = cfg.dialect_name() == "mssql";
     while i < lines.len() {
         let line = lines[i];
         let top = state.at_top_level();
-        if top && (is_go_line(line) || is_sqlcmd_line(line)) {
+        if sqlcmd && top && (is_go_line(line) || is_sqlcmd_line(line)) {
             flush(batch_start, i, &mut out, &mut stats);
             out.push(line.to_string());
             batch_start = i + 1;

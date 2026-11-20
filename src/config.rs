@@ -10,6 +10,7 @@
 //! rejects the rest with "not implemented yet for <key>", so no option is
 //! ever silently ignored.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -103,12 +104,23 @@ macro_rules! section {
 section! {
     /// The whole file.
     Config {
-        /// The sqlparser dialect used to parse and, for the safety net, to
-        /// tokenize: `mssql` (the default) or any other dialect the crate
-        /// has. The layout rules are written for T-SQL; with another dialect
-        /// whatever doesn't parse, or wouldn't come back with the same
-        /// tokens, is left as written.
-        dialect: String = "mssql".to_string(),
+        /// The dialect of the files this configuration formats, unless
+        /// `dialect_paths` or `--dialect` says otherwise: one of sqlparser's
+        /// dialects (`DIALECTS`). It selects the tokenizer and grammar, the
+        /// client's script syntax (`GO`, `DELIMITER`, `\` meta-commands,
+        /// dot-commands) and the `[dialects.<name>]` section layered over
+        /// the general settings. `generic` (sqlparser's union of every
+        /// dialect, no client syntax) by default.
+        dialect: String = "generic".to_string(),
+        /// Per-dialect style: each `[dialects.<name>]` section holds any of
+        /// the style keys below, which replace the general ones for files
+        /// of that dialect (JetBrains' "General" code style, inherited by
+        /// each SQL dialect unless it overrides a setting).
+        dialects: BTreeMap<String, Config> = BTreeMap::new(),
+        /// Files and directories mapped to a dialect (JetBrains' SQL
+        /// dialect mappings): the most specific matching entry wins over
+        /// `dialect`.
+        dialect_paths: Vec<DialectPath> = Vec::new(),
         /// Right margin (columns).
         margin: usize = 120,
         /// One indent level (spaces): statement blocks, clause continuation
@@ -192,8 +204,39 @@ section! {
         routine_params: RoutineParams = RoutineParams::default(),
         /// The column list of `create view v (a, b)`.
         view_columns: KeptList = KeptList::default(),
+
+        /// The raw tables, for layering `[dialects.<name>]` over the
+        /// general keys (not a key of the file).
+        #[serde(skip)]
+        layers: Layers = Layers::default(),
     }
 }
+
+section! {
+    /// One `[[dialect_paths]]` entry.
+    DialectPath {
+        /// A file, or a directory (everything below it). `~/` is the home
+        /// directory; a relative path is relative to the configuration
+        /// file's directory.
+        path: String = String::new(),
+        /// The dialect of the files there.
+        dialect: String = String::new(),
+    }
+}
+
+/// What `Config::parse` keeps of the file besides the typed values: the
+/// general style keys and each dialect's section as written, so that a
+/// dialect's settings can be layered key by key over the general ones, and
+/// the directory relative `dialect_paths` resolve against.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Layers {
+    general: toml::Table,
+    dialects: BTreeMap<String, toml::Table>,
+    base_dir: Option<PathBuf>,
+}
+
+/// The keys that aren't style: they may not appear in `[dialects.<name>]`.
+const META_KEYS: &[&str] = &["dialect", "dialects", "dialect_paths"];
 
 section! {
     /// A `select` list.
@@ -505,16 +548,17 @@ impl Condition {
     }
 }
 
-/// The dialect names `dialect` accepts.
+/// The dialect names `dialect` accepts: sqlparser's dialects, by the names
+/// `sqlparser::dialect::dialect_from_str` knows.
 pub const DIALECTS: &[&str] = &[
-    "mssql",
+    "generic",
     "ansi",
     "bigquery",
     "clickhouse",
     "databricks",
     "duckdb",
-    "generic",
     "hive",
+    "mssql",
     "mysql",
     "oracle",
     "postgresql",
@@ -525,11 +569,108 @@ pub const DIALECTS: &[&str] = &[
     "teradata",
 ];
 
+/// Other names sqlparser accepts for a dialect, and the name they stand for.
+const DIALECT_ALIASES: &[(&str, &str)] = &[("postgres", "postgresql"), ("sparksql", "spark")];
+
+/// The name a dialect goes by in `DIALECTS`, for any name sqlparser accepts
+/// (case-insensitive).
+pub fn canonical_dialect(name: &str) -> Option<&'static str> {
+    let lower = name.to_ascii_lowercase();
+    DIALECTS.iter().copied().find(|d| *d == lower).or_else(|| {
+        DIALECT_ALIASES
+            .iter()
+            .find(|(a, _)| *a == lower)
+            .map(|(_, d)| *d)
+    })
+}
+
+fn unknown_dialect(name: &str) -> String {
+    format!(
+        "unknown dialect \"{name}\" (one of: {})",
+        DIALECTS
+            .iter()
+            .map(|d| format!("\"{d}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
 impl Config {
     /// The parser dialect.
     pub fn dialect(&self) -> Box<dyn Dialect> {
         sqlparser::dialect::dialect_from_str(&self.dialect)
-            .unwrap_or_else(|| Box::new(sqlparser::dialect::MsSqlDialect {}))
+            .unwrap_or_else(|| Box::new(sqlparser::dialect::GenericDialect {}))
+    }
+
+    /// The canonical name of `dialect` (`generic` if it isn't one).
+    pub fn dialect_name(&self) -> &'static str {
+        canonical_dialect(&self.dialect).unwrap_or("generic")
+    }
+
+    /// The configuration for formatting files of `dialect`: the general
+    /// style keys with the file's `[dialects.<dialect>]` section layered
+    /// over them, key by key. The result's `dialect` is `dialect`.
+    pub fn for_dialect(&self, dialect: &str) -> Config {
+        let name = canonical_dialect(dialect).unwrap_or("generic");
+        let mut c = match self.layers.dialects.get(name) {
+            Some(layer) => {
+                let mut table = self.layers.general.clone();
+                merge(&mut table, layer);
+                toml::Value::Table(table)
+                    .try_into::<Config>()
+                    .unwrap_or_else(|_| self.clone())
+            }
+            None => self.clone(),
+        };
+        c.dialect = name.to_string();
+        c.dialects.clear();
+        c.dialect_paths.clear();
+        c.layers = Layers::default();
+        c
+    }
+
+    /// The dialect of the file at `path`: the most specific
+    /// `[[dialect_paths]]` entry that is the file or a directory above it
+    /// (on a tie, the later entry), else `dialect`. `path` is made absolute
+    /// against the current directory.
+    pub fn dialect_for(&self, path: Option<&Path>) -> &str {
+        let Some(path) = path else {
+            return &self.dialect;
+        };
+        let file = normalize(&std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()));
+        let mut best: Option<(usize, &str)> = None;
+        for dp in &self.dialect_paths {
+            let p = normalize(&self.resolve_path(&dp.path));
+            if file.starts_with(&p) {
+                let depth = p.components().count();
+                if best.is_none_or(|(d, _)| depth >= d) {
+                    best = Some((depth, &dp.dialect));
+                }
+            }
+        }
+        best.map_or(&self.dialect, |(_, d)| d)
+    }
+
+    /// A `dialect_paths` path as an absolute path: `~/` expanded, relative
+    /// paths against the configuration file's directory.
+    fn resolve_path(&self, p: &str) -> PathBuf {
+        let expanded = match p.strip_prefix("~/").or((p == "~").then_some("")) {
+            Some(rest) => match std::env::var_os("HOME") {
+                Some(home) => PathBuf::from(home).join(rest),
+                None => PathBuf::from(p),
+            },
+            None => PathBuf::from(p),
+        };
+        if expanded.is_absolute() {
+            expanded
+        } else {
+            let base = self
+                .layers
+                .base_dir
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("."));
+            std::path::absolute(base.join(&expanded)).unwrap_or(expanded)
+        }
     }
 
     /// Parses and validates the text of a configuration file. `path` is
@@ -540,15 +681,105 @@ impl Config {
             at: line,
             message,
         };
-        let cfg: Config = toml::from_str(text).map_err(|e| {
+        let mut cfg: Config = toml::from_str(text).map_err(|e| {
             let at = e.span().map(|s| line_col(text, s.start));
             err(at, e.message().trim_end().to_string())
         })?;
-        let problems = cfg.validate();
+        let problems = cfg.validate_file();
         if let Some((key, msg)) = problems.into_iter().next() {
             return Err(err(locate(text, &key), msg));
         }
+        // The tables as written, for layering (`for_dialect`).
+        let mut general: toml::Table = text
+            .parse()
+            .map_err(|e: toml::de::Error| err(None, e.message().trim_end().to_string()))?;
+        let mut dialects = BTreeMap::new();
+        if let Some(toml::Value::Table(ds)) = general.remove("dialects") {
+            for (name, layer) in ds {
+                if let (Some(d), toml::Value::Table(t)) = (canonical_dialect(&name), layer) {
+                    dialects.insert(d.to_string(), t);
+                }
+            }
+        }
+        for k in META_KEYS {
+            general.remove(*k);
+        }
+        // Canonical names, so `postgres` and `postgresql` are one dialect.
+        if let Some(d) = canonical_dialect(&cfg.dialect) {
+            cfg.dialect = d.to_string();
+        }
+        for dp in &mut cfg.dialect_paths {
+            if let Some(d) = canonical_dialect(&dp.dialect) {
+                dp.dialect = d.to_string();
+            }
+        }
+        cfg.dialects = std::mem::take(&mut cfg.dialects)
+            .into_iter()
+            .filter_map(|(k, v)| canonical_dialect(&k).map(|d| (d.to_string(), v)))
+            .collect();
+        cfg.layers = Layers {
+            general,
+            dialects,
+            base_dir: path.and_then(Path::parent).map(Path::to_path_buf),
+        };
         Ok(cfg)
+    }
+
+    /// `validate` for a whole file: the general keys, each
+    /// `[dialects.<name>]` section and each `[[dialect_paths]]` entry.
+    fn validate_file(&self) -> Vec<(String, String)> {
+        let mut problems = self.validate();
+        let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
+        let defaults = Config::default();
+        for (name, layer) in &self.dialects {
+            let key = format!("dialects.{name}");
+            match canonical_dialect(name) {
+                None => problems.push((key.clone(), unknown_dialect(name))),
+                Some(d) => {
+                    if let Some(other) = seen.insert(d, name) {
+                        problems.push((
+                            key.clone(),
+                            format!(
+                                "[dialects.{name}] and [dialects.{other}] are the same dialect"
+                            ),
+                        ));
+                    }
+                }
+            }
+            for (meta, set) in [
+                ("dialect", layer.dialect != defaults.dialect),
+                ("dialects", !layer.dialects.is_empty()),
+                ("dialect_paths", !layer.dialect_paths.is_empty()),
+            ] {
+                if set {
+                    problems.push((
+                        format!("{key}.{meta}"),
+                        format!("`{meta}` can't be set in [{key}], only at the top level"),
+                    ));
+                }
+            }
+            problems.extend(layer.validate_at(&format!("{key}.")));
+        }
+        for (i, dp) in self.dialect_paths.iter().enumerate() {
+            if dp.path.is_empty() {
+                problems.push((
+                    format!("dialect_paths.{i}"),
+                    "a [[dialect_paths]] entry needs a `path`".to_string(),
+                ));
+            }
+            if dp.dialect.is_empty() {
+                problems.push((
+                    format!("dialect_paths.{i}"),
+                    "a [[dialect_paths]] entry needs a `dialect`".to_string(),
+                ));
+            } else if canonical_dialect(&dp.dialect).is_none() {
+                problems.push((
+                    format!("dialect_paths.{i}.dialect"),
+                    unknown_dialect(&dp.dialect),
+                ));
+            }
+        }
+        problems
     }
 
     /// Reads, parses and validates a configuration file.
@@ -562,9 +793,16 @@ impl Config {
     }
 
     /// The configuration for formatting a file in `dir`: the first
-    /// `sqp-fmt.toml` in `dir` or a directory above it, or the defaults.
-    pub fn discover(dir: &Path) -> Result<(Config, Option<PathBuf>), ConfigError> {
-        match find(dir) {
+    /// `sqp-fmt.toml` in `dir` or a directory above it; else `user` (the
+    /// user-level fallback, `user_config()`) if that file exists; else the
+    /// defaults. The file found is the whole configuration: nothing is
+    /// merged from files further up or from `user`.
+    pub fn discover(
+        dir: &Path,
+        user: Option<&Path>,
+    ) -> Result<(Config, Option<PathBuf>), ConfigError> {
+        let found = find(dir).or_else(|| user.filter(|u| u.is_file()).map(Path::to_path_buf));
+        match found {
             Some(p) => Config::load(&p).map(|c| (c, Some(p))),
             None => Ok((Config::default(), None)),
         }
@@ -573,25 +811,22 @@ impl Config {
     /// Checks every value against what's implemented. Returns (key,
     /// message) per problem, in key order.
     pub fn validate(&self) -> Vec<(String, String)> {
+        self.validate_at("")
+    }
+
+    /// `validate` for the keys of a section at `prefix` (`dialects.mssql.`).
+    fn validate_at(&self, prefix: &str) -> Vec<(String, String)> {
         use Comma::*;
         use Wrap::*;
         const ALL: &[Wrap] = &[Never, IfLong, ChopIfLong, Always];
         const COMMAS: &[Comma] = &[Leading, Trailing];
         const BOOLS: &[bool] = &[true, false];
-        let mut v = Validator::default();
-        if !DIALECTS.contains(&self.dialect.as_str()) {
-            v.problem(
-                "dialect",
-                format!(
-                    "unknown dialect \"{}\" (one of: {})",
-                    self.dialect,
-                    DIALECTS
-                        .iter()
-                        .map(|d| format!("\"{d}\""))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            );
+        let mut v = Validator {
+            prefix: prefix.to_string(),
+            ..Validator::default()
+        };
+        if canonical_dialect(&self.dialect).is_none() {
+            v.problem("dialect", unknown_dialect(&self.dialect));
         }
         if !(20..=1000).contains(&self.margin) {
             v.problem(
@@ -719,21 +954,24 @@ impl Config {
 #[derive(Default)]
 struct Validator {
     problems: Vec<(String, String)>,
+    /// Prepended to every key (a `[dialects.<name>]` section's).
+    prefix: String,
 }
 
 impl Validator {
     fn problem(&mut self, key: &str, msg: String) {
-        self.problems.push((key.to_string(), msg));
+        self.problems.push((format!("{}{key}", self.prefix), msg));
     }
 
     fn not_implemented(&mut self, key: &str, value: &str, ok: &[String]) {
-        self.problem(
-            key,
+        let key = &format!("{}{key}", self.prefix);
+        self.problems.push((
+            key.clone(),
             format!(
                 "{key} = {value} is not implemented yet for {key} (implemented: {})",
                 ok.join(", ")
             ),
-        );
+        ));
     }
 
     fn wrap(&mut self, key: &str, v: Wrap, ok: &[Wrap]) {
@@ -804,6 +1042,45 @@ macro_rules! as_list {
 }
 as_list!(KeptList, FilledList);
 
+/// The user-level fallback configuration:
+/// `$XDG_CONFIG_HOME/sqp-fmt/sqp-fmt.toml`, with `XDG_CONFIG_HOME`
+/// defaulting to `~/.config` (XDG Base Directory Specification), whether
+/// or not it exists.
+pub fn user_config() -> Option<PathBuf> {
+    let base = match std::env::var_os("XDG_CONFIG_HOME") {
+        Some(x) if Path::new(&x).is_absolute() => PathBuf::from(x),
+        _ => PathBuf::from(std::env::var_os("HOME")?).join(".config"),
+    };
+    Some(base.join("sqp-fmt").join(FILE_NAME))
+}
+
+/// `over`'s keys written into `base`, recursing into tables both have.
+fn merge(base: &mut toml::Table, over: &toml::Table) {
+    for (k, v) in over {
+        match (base.get_mut(k), v) {
+            (Some(toml::Value::Table(b)), toml::Value::Table(o)) => merge(b, o),
+            _ => {
+                base.insert(k.clone(), v.clone());
+            }
+        }
+    }
+}
+
+/// `p` without `.` and `..` components (lexically).
+fn normalize(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// The first `sqp-fmt.toml` in `dir` or a directory above it.
 pub fn find(dir: &Path) -> Option<PathBuf> {
     let dir = if dir.as_os_str().is_empty() {
@@ -861,6 +1138,18 @@ fn locate(text: &str, key: &str) -> Option<(usize, usize)> {
         }
         match value.get_ref() {
             toml::de::DeValue::Table(t) => table = t,
+            // `dialect_paths.0.dialect`: an entry of an array of tables.
+            toml::de::DeValue::Array(a) => {
+                let i: usize = parts.next()?.parse().ok()?;
+                let entry = a.get(i)?;
+                if parts.peek().is_none() {
+                    return Some(line_col(text, entry.span().start));
+                }
+                match entry.get_ref() {
+                    toml::de::DeValue::Table(t) => table = t,
+                    _ => return None,
+                }
+            }
             _ => return None,
         }
     }
@@ -962,7 +1251,7 @@ mod tests {
     fn unknown_dialect() {
         let e = err("dialect = \"tsql\"\n");
         assert!(
-            e.starts_with("t/sqp-fmt.toml:1:11: unknown dialect \"tsql\" (one of: \"mssql\""),
+            e.starts_with("t/sqp-fmt.toml:1:11: unknown dialect \"tsql\" (one of: \"generic\""),
             "{e}"
         );
         for d in DIALECTS {
@@ -994,6 +1283,90 @@ mod tests {
     }
 
     #[test]
+    fn dialect_sections_layer_key_by_key() {
+        let c = Config::parse(
+            "indent = 2\nmargin = 100\n[where.groups]\nwrap = \"always\"\nkeep_line_breaks = false\n\
+             [dialects.mssql]\nindent = 4\n[dialects.mssql.where.groups]\nwrap = \"never\"\n\
+             [dialects.postgres.select_list]\ncomma = \"trailing\"\n",
+            None,
+        )
+        .unwrap();
+        assert_eq!(c.dialect, "generic");
+        let g = c.for_dialect("generic");
+        assert_eq!((g.indent, g.margin), (2, 100));
+        assert_eq!(g.where_.groups.wrap, Wrap::Always);
+        let m = c.for_dialect("mssql");
+        assert_eq!(m.dialect, "mssql");
+        // Its own keys...
+        assert_eq!(m.indent, 4);
+        assert_eq!(m.where_.groups.wrap, Wrap::Never);
+        // ... and the general ones it doesn't set, down to sibling keys.
+        assert_eq!(m.margin, 100);
+        assert!(!m.where_.groups.keep_line_breaks);
+        assert_eq!(m.select_list.comma, Comma::Leading);
+        // An alias names the same section.
+        let p = c.for_dialect("postgresql");
+        assert_eq!(p.select_list.comma, Comma::Trailing);
+        assert_eq!(p.indent, 2);
+    }
+
+    #[test]
+    fn dialect_sections_are_validated() {
+        let e = err("[dialects.mssql]\ndialect = \"mysql\"\n");
+        assert!(
+            e.starts_with("t/sqp-fmt.toml:2:11: `dialect` can't be set"),
+            "{e}"
+        );
+        let e = err("[dialects.mssql.exists]\nwrap = \"never\"\n");
+        assert!(
+            e.starts_with(
+                "t/sqp-fmt.toml:2:8: dialects.mssql.exists.wrap = \"never\" is not implemented"
+            ),
+            "{e}"
+        );
+        let e = err("[dialects.postgres]\nindent = 2\n[dialects.postgresql]\nindent = 3\n");
+        assert!(e.contains("are the same dialect"), "{e}");
+        let e = err("[[dialect_paths]]\ndialect = \"mssql\"\n");
+        assert!(
+            e.starts_with("t/sqp-fmt.toml:1:1: a [[dialect_paths]] entry needs a `path`"),
+            "{e}"
+        );
+        let e = err("[[dialect_paths]]\npath = \"a\"\ndialekt = \"mssql\"\n");
+        assert!(e.contains("unknown field `dialekt`"), "{e}");
+    }
+
+    #[test]
+    fn dialect_paths_most_specific_wins() {
+        let c = Config::parse(
+            "dialect = \"mysql\"\n\
+             [[dialect_paths]]\npath = \"/w\"\ndialect = \"mssql\"\n\
+             [[dialect_paths]]\npath = \"/w/pg\"\ndialect = \"postgres\"\n\
+             [[dialect_paths]]\npath = \"/w/pg/x.sql\"\ndialect = \"generic\"\n\
+             [[dialect_paths]]\npath = \"rel\"\ndialect = \"sqlite\"\n",
+            Some(Path::new("/cfg/sqp-fmt.toml")),
+        )
+        .unwrap();
+        let d = |p: &str| c.dialect_for(Some(Path::new(p))).to_string();
+        assert_eq!(d("/w/a.sql"), "mssql");
+        assert_eq!(d("/w/pg/a/b.sql"), "postgresql");
+        assert_eq!(d("/w/pg/x.sql"), "generic");
+        // Whole components only, and `..` resolved.
+        assert_eq!(d("/wx/a.sql"), "mysql");
+        assert_eq!(d("/w/pg/../a.sql"), "mssql");
+        // Relative to the configuration file's directory.
+        assert_eq!(d("/cfg/rel/a.sql"), "sqlite");
+        assert_eq!(c.dialect_for(None), "mysql");
+    }
+
+    #[test]
+    fn user_config_follows_xdg() {
+        // Only the path's shape: the variables are the process's own.
+        if let Some(p) = user_config() {
+            assert!(p.ends_with("sqp-fmt/sqp-fmt.toml"), "{}", p.display());
+        }
+    }
+
+    #[test]
     fn find_walks_up() {
         let root = std::env::temp_dir().join(format!("sqp-fmt-find-{}", std::process::id()));
         let deep = root.join("a/b/c");
@@ -1003,7 +1376,7 @@ mod tests {
         assert_eq!(find(&deep), Some(root.join("a").join(FILE_NAME)));
         std::fs::write(root.join("a/b").join(FILE_NAME), "margin = 90\n").unwrap();
         assert_eq!(find(&deep), Some(root.join("a/b").join(FILE_NAME)));
-        let (c, p) = Config::discover(&deep).unwrap();
+        let (c, p) = Config::discover(&deep, None).unwrap();
         assert_eq!(c.margin, 90);
         assert_eq!(p, Some(root.join("a/b").join(FILE_NAME)));
         std::fs::remove_dir_all(&root).unwrap();

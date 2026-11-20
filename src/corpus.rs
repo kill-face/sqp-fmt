@@ -1,8 +1,10 @@
-//! `sqp-fmt corpus [--config FILE] [--diff FILE] [--top N] <path>...`: format
-//! every .sql file in memory and report how much changed, the safety-net
-//! fallbacks and idempotency failures. This is the progress measure for the
-//! formatter. The configuration is `--config FILE` or the defaults (no
-//! `sqp-fmt.toml` discovery).
+//! `sqp-fmt corpus [--config FILE] [--dialect NAME] [--diff FILE] [--top N] <path>...`:
+//! format every .sql file in memory and report how much changed, the
+//! safety-net fallbacks and idempotency failures. This is the progress
+//! measure for the formatter. The configuration is `--config FILE` or the
+//! defaults (no `sqp-fmt.toml` discovery); the dialect is `--dialect`, else
+//! the configuration's `[[dialect_paths]]` entry for the file, else its
+//! `dialect`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -17,6 +19,7 @@ pub fn run(args: &[String]) -> ExitCode {
     let mut roots = Vec::new();
     let mut verbose = false;
     let mut cfg = sqp_fmt::Config::default();
+    let mut dialect: Option<String> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -28,6 +31,10 @@ pub fn run(args: &[String]) -> ExitCode {
                 }
                 None => return usage(),
             },
+            "--dialect" => match it.next() {
+                Some(d) => dialect = Some(d.clone()),
+                None => return usage(),
+            },
             "--diff" => diff_file = it.next().cloned(),
             "--top" => top = it.next().and_then(|n| n.parse().ok()).unwrap_or(top),
             "--problems" => verbose = true,
@@ -37,7 +44,21 @@ pub fn run(args: &[String]) -> ExitCode {
         }
     }
     std::panic::set_hook(Box::new(|_| {}));
+    let base = cfg;
+    let mut per_dialect: HashMap<&'static str, sqp_fmt::Config> = HashMap::new();
+    let mut config_for = |path: &Path| -> Option<sqp_fmt::Config> {
+        let d = crate::resolve_dialect(dialect.as_deref(), &base, Some(path))?;
+        Some(
+            per_dialect
+                .entry(d)
+                .or_insert_with(|| base.for_dialect(d))
+                .clone(),
+        )
+    };
     if let Some(f) = diff_file {
+        let Some(cfg) = config_for(Path::new(&f)) else {
+            return ExitCode::from(2);
+        };
         let src = match std::fs::read_to_string(&f) {
             Ok(s) => s,
             Err(e) => {
@@ -76,6 +97,9 @@ pub fn run(args: &[String]) -> ExitCode {
         let Ok(src) = std::fs::read_to_string(file) else {
             eprintln!("{}: unreadable", file.display());
             continue;
+        };
+        let Some(cfg) = config_for(file) else {
+            return ExitCode::from(2);
         };
         let t = Instant::now();
         let (out, stats) = sqp_fmt::format_with(&src, &cfg);

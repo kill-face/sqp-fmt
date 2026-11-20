@@ -1,8 +1,13 @@
 //! File-level behaviour: line endings, BOM, final newline, `GO` lines,
 //! batches that can't be formatted.
 
+/// Formats as T-SQL (`GO` batches are sqlcmd's).
 fn fmt(s: &str) -> String {
-    sqp_fmt::format(s).0
+    sqp_fmt::format_with(s, &mssql()).0
+}
+
+fn mssql() -> sqp_fmt::Config {
+    sqp_fmt::Config::default().for_dialect("mssql")
 }
 
 #[test]
@@ -46,7 +51,7 @@ fn mixed_line_endings_in_code_leave_the_file_alone() {
 #[test]
 fn unparsable_batch_is_verbatim_others_formatted() {
     let src = "SELECT  1\ngo\nselect ( from\ngo\nSELECT  2\n";
-    let (out, stats) = sqp_fmt::format(src);
+    let (out, stats) = sqp_fmt::format_with(src, &mssql());
     assert_eq!(out, "select 1\ngo\nselect ( from\ngo\nselect 2\n");
     assert_eq!(stats.unparsed, 1);
     assert_eq!(stats.formatted, 2);

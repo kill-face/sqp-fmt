@@ -1,8 +1,10 @@
-//! Golden tests: every `tests/golden/NAME.sql` is formatted and compared
-//! with `tests/golden/NAME.expected.sql`. Set `SQP_FMT_BLESS=1` to write the
-//! expected files from the current output (then review the diff). A
-//! `tests/golden/NAME.toml` next to the input is that test's configuration
-//! (else the defaults).
+//! Golden tests: every `tests/golden/DIALECT/NAME.sql` is formatted as
+//! DIALECT and compared with `tests/golden/DIALECT/NAME.expected.sql`. The
+//! directory maps its files to the dialect, as a `[[dialect_paths]]` entry
+//! would. Set `SQP_FMT_BLESS=1` to write the expected files from the current
+//! output (then review the diff). A `NAME.toml` next to the input is that
+//! test's configuration (else the defaults), resolved for the dialect (its
+//! `[dialects.DIALECT]` section layered over its general keys).
 //!
 //! Property checks over every input and expected file:
 //! - the output has the same tokens as the input (comments included; case
@@ -13,41 +15,57 @@
 
 use std::path::{Path, PathBuf};
 
-use sqlparser::dialect::MsSqlDialect;
 use sqlparser::tokenizer::{Token, Tokenizer, Whitespace};
 
 fn cases() -> Vec<PathBuf> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
-    let mut v: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .filter(|p| {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
+    let mut v = Vec::new();
+    for dir in std::fs::read_dir(&root).unwrap() {
+        let dir = dir.unwrap().path();
+        let name = dir.file_name().unwrap().to_str().unwrap().to_string();
+        assert!(
+            dir.is_dir() && sqp_fmt::config::canonical_dialect(&name) == Some(name.as_str()),
+            "{}: golden tests live in a directory named after their dialect",
+            dir.display()
+        );
+        for e in std::fs::read_dir(&dir).unwrap() {
+            let p = e.unwrap().path();
             let name = p.file_name().unwrap().to_str().unwrap();
-            name.ends_with(".sql") && !name.ends_with(".expected.sql")
-        })
-        .collect();
+            if name.ends_with(".sql") && !name.ends_with(".expected.sql") {
+                v.push(p);
+            }
+        }
+    }
     v.sort();
-    assert!(!v.is_empty(), "no golden tests in {}", dir.display());
+    assert!(!v.is_empty(), "no golden tests in {}", root.display());
     v
+}
+
+/// The dialect of a test: its directory's name.
+fn dialect(input: &Path) -> String {
+    let d = input.parent().unwrap().file_name().unwrap();
+    d.to_str().unwrap().to_string()
 }
 
 fn expected_path(input: &Path) -> PathBuf {
     input.with_extension("expected.sql")
 }
 
-/// The test's configuration: `NAME.toml`, or the defaults.
+/// The test's configuration: `NAME.toml`, or the defaults, for its
+/// directory's dialect.
 fn config(input: &Path) -> sqp_fmt::Config {
     let path = input.with_extension("toml");
-    if path.exists() {
+    let cfg = if path.exists() {
         sqp_fmt::Config::load(&path).unwrap_or_else(|e| panic!("{e}"))
     } else {
         sqp_fmt::Config::default()
-    }
+    };
+    cfg.for_dialect(&dialect(input))
 }
 
 /// Tokens without whitespace; unquoted words lower-cased.
-fn tokens(sql: &str) -> Vec<String> {
-    Tokenizer::new(&MsSqlDialect {}, sql)
+fn tokens(sql: &str, cfg: &sqp_fmt::Config) -> Vec<String> {
+    Tokenizer::new(cfg.dialect().as_ref(), sql)
         .tokenize()
         .unwrap()
         .into_iter()
@@ -122,8 +140,8 @@ fn tokens_preserved() {
             };
             let (out, _) = sqp_fmt::format_with(&src, &cfg);
             assert_eq!(
-                tokens(&src),
-                tokens(&out),
+                tokens(&src, &cfg),
+                tokens(&out, &cfg),
                 "{}: tokens changed",
                 path.display()
             );

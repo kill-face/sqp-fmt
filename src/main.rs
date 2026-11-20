@@ -13,11 +13,12 @@ mod corpus;
 
 pub(crate) fn usage() -> ExitCode {
     eprintln!(
-        "usage: sqp-fmt [--config FILE] [--stdin-filepath PATH] [FILE | -]\n         \
+        "usage: sqp-fmt [--config FILE] [--dialect NAME] [--stdin-filepath PATH] [FILE | -]\n         \
          format FILE (or stdin) to stdout, with FILE's (PATH's) sqp-fmt.toml\n       \
-         sqp-fmt corpus [--config FILE] [--diff FILE] [--top N] <path>...\n       \
-         sqp-fmt check [--files] <path>...\n       \
-         sqp-fmt spans [--details] <path>..."
+         sqp-fmt corpus [--config FILE] [--dialect NAME] [--diff FILE] [--top N] <path>...\n       \
+         sqp-fmt corpus --sqlfluff [--config FILE] <dir>\n       \
+         sqp-fmt check [--dialect NAME] [--files] <path>...\n       \
+         sqp-fmt spans [--dialect NAME] [--details] <path>..."
     );
     ExitCode::from(2)
 }
@@ -200,17 +201,21 @@ fn spans(args: &[String]) -> ExitCode {
     }
 }
 
-/// `sqp-fmt [--config FILE] [--stdin-filepath PATH] [FILE | -]`: format
-/// FILE (or stdin) to stdout. Batches that can't be formatted safely come
-/// out exactly as written.
+/// `sqp-fmt [--config FILE] [--dialect NAME] [--stdin-filepath PATH] [FILE | -]`:
+/// format FILE (or stdin) to stdout. Batches that can't be formatted safely
+/// come out exactly as written.
 ///
 /// The configuration is `--config FILE`, else the first `sqp-fmt.toml` in
 /// the formatted file's directory or one above it (for stdin: from
 /// `--stdin-filepath`'s directory, else the current directory), else the
-/// defaults. A bad configuration is an error: nothing is written to stdout.
+/// user's `$XDG_CONFIG_HOME/sqp-fmt/sqp-fmt.toml`, else the defaults. The
+/// dialect is `--dialect`, else the configuration's `[[dialect_paths]]`
+/// entry for the file, else its `dialect`. A bad configuration is an error:
+/// nothing is written to stdout.
 fn format_cmd(args: &[String]) -> ExitCode {
     use std::io::{Read, Write};
     let mut config: Option<PathBuf> = None;
+    let mut dialect: Option<String> = None;
     let mut stdin_path: Option<PathBuf> = None;
     let mut file: Option<PathBuf> = None;
     let mut it = args.iter();
@@ -223,6 +228,10 @@ fn format_cmd(args: &[String]) -> ExitCode {
         match flag {
             "--config" => match value() {
                 Some(v) => config = Some(PathBuf::from(v)),
+                None => return usage(),
+            },
+            "--dialect" => match value() {
+                Some(v) => dialect = Some(v),
                 None => return usage(),
             },
             "--stdin-filepath" => match value() {
@@ -238,15 +247,16 @@ fn format_cmd(args: &[String]) -> ExitCode {
         eprintln!("sqp-fmt: --stdin-filepath only applies when reading stdin");
         return ExitCode::from(2);
     }
+    let named = file.as_deref().or(stdin_path.as_deref());
     let cfg = match &config {
         Some(c) => sqp_fmt::Config::load(c),
         None => {
-            let named = file.as_deref().or(stdin_path.as_deref());
             let dir = named
                 .and_then(Path::parent)
                 .map(Path::to_path_buf)
                 .unwrap_or_default();
-            sqp_fmt::Config::discover(&dir).map(|(c, _)| c)
+            let user = sqp_fmt::config::user_config();
+            sqp_fmt::Config::discover(&dir, user.as_deref()).map(|(c, _)| c)
         }
     };
     let cfg = match cfg {
@@ -256,6 +266,10 @@ fn format_cmd(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let Some(dialect) = resolve_dialect(dialect.as_deref(), &cfg, named) else {
+        return ExitCode::from(2);
+    };
+    let cfg = cfg.for_dialect(dialect);
     // A panic is caught per batch and that batch left as written; keep the
     // panic message off stderr, which editors show to the user.
     std::panic::set_hook(Box::new(|_| {}));
@@ -278,6 +292,31 @@ fn format_cmd(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+/// The dialect for a file: `flag` (`--dialect`), else the configuration's
+/// mapping for `path`, else its `dialect`. Prints an error for an unknown
+/// `--dialect`.
+pub(crate) fn resolve_dialect(
+    flag: Option<&str>,
+    cfg: &sqp_fmt::Config,
+    path: Option<&Path>,
+) -> Option<&'static str> {
+    match flag {
+        Some(f) => {
+            let d = sqp_fmt::config::canonical_dialect(f);
+            if d.is_none() {
+                eprintln!(
+                    "sqp-fmt: --dialect: unknown dialect \"{f}\" (one of: {})",
+                    sqp_fmt::config::DIALECTS.join(", ")
+                );
+            }
+            d
+        }
+        None => {
+            Some(sqp_fmt::config::canonical_dialect(cfg.dialect_for(path)).unwrap_or("generic"))
+        }
+    }
 }
 
 fn main() -> ExitCode {
