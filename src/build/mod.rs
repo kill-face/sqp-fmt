@@ -362,12 +362,55 @@ impl Builder<'_> {
         }
     }
 
+    /// The side the list comma at token `comma` goes on, before the item
+    /// starting at token `next`: `configured`, unless a comment sits between
+    /// the comma and one of its neighbours. Only whitespace may change, so a
+    /// comma can't cross a comment: it stays beside the neighbour it touches,
+    /// trailing (`a,`) when the comment follows it, leading (`, b`) when the
+    /// comment precedes it.
+    pub fn comma_side(&self, comma: usize, next: usize, configured: Comma) -> Comma {
+        let before = self.l.trivia[comma].has_comments();
+        let after = self.l.trivia[next].has_comments();
+        match (before, after) {
+            (true, false) => Comma::Leading,
+            (false, true) => Comma::Trailing,
+            _ => configured,
+        }
+    }
+
+    /// The comma side for a whole comma-separated list: when comments pin
+    /// some of its commas to one side (`comma_side`) and they all agree, the
+    /// list keeps that side throughout rather than mixing `a,` and `, b`;
+    /// otherwise `configured`.
+    pub fn list_comma_side(&self, items: &[R], configured: Comma) -> Comma {
+        let mut pinned = None;
+        for w in items.windows(2) {
+            let (c, b) = (w[0].1 + 1, w[1].0);
+            if !(c + 1 == b && self.is(c, &Token::Comma)) {
+                continue;
+            }
+            let before = self.l.trivia[c].has_comments();
+            let after = self.l.trivia[b].has_comments();
+            let side = match (before, after) {
+                (true, false) => Comma::Leading,
+                (false, true) => Comma::Trailing,
+                _ => continue,
+            };
+            match pinned {
+                None => pinned = Some(side),
+                Some(p) if p != side => return configured,
+                Some(_) => {}
+            }
+        }
+        pinned.unwrap_or(configured)
+    }
+
     /// Chops a comma-separated list with leading commas when group `g`
     /// breaks: each `, item` starts a line at `ind`.
     ///
     /// A comment written right after a comma can't move before it, so such a
     /// comma stays at the end of its line and the next item starts a line
-    /// at the items' column.
+    /// at the items' column (`comma_side`).
     pub fn comma_chop(&mut self, items: &[R], g: usize, ind: Ind) {
         let item_ind = match ind {
             Ind::Col(t, off) => Ind::Col(t, off + 2),
@@ -377,13 +420,31 @@ impl Builder<'_> {
         for w in items.windows(2) {
             let (a, b) = (w[0], w[1]);
             if a.1 + 2 == b.0 && self.is(a.1 + 1, &Token::Comma) {
-                if self.l.trivia[b.0].has_comments() {
+                if self.comma_side(a.1 + 1, b.0, Comma::Leading) == Comma::Trailing {
                     self.set(a.1 + 1, Rule::Flat(Sp::No));
                     self.set(b.0, Rule::BreakIf(g, item_ind, Sp::One));
                 } else {
                     self.set(a.1 + 1, Rule::BreakIf(g, ind, Sp::No));
                     self.set(b.0, Rule::FlatIn(g, Sp::One));
                 }
+            }
+        }
+    }
+
+    /// Chops a comma-separated list with trailing commas when group `g`
+    /// breaks: each item starts a line at `item_ind`, its comma ending the
+    /// line before. A comment written right before a comma can't move after
+    /// it, so such a comma leads its item instead, at `comma_ind`
+    /// (`comma_side`).
+    pub fn trailing_chop(&mut self, items: &[R], g: usize, comma_ind: Ind, item_ind: Ind) {
+        for w in items.windows(2) {
+            let (c, b) = (w[0].1 + 1, w[1].0);
+            if self.comma_side(c, b, Comma::Trailing) == Comma::Leading {
+                self.set(c, Rule::BreakIf(g, comma_ind, Sp::No));
+                self.set(b, Rule::FlatIn(g, Sp::One));
+            } else {
+                self.set(c, Rule::FlatIn(g, Sp::No));
+                self.set(b, Rule::BreakIf(g, item_ind, Sp::One));
             }
         }
     }
@@ -502,6 +563,10 @@ impl Builder<'_> {
         if items.len() < 2 || !self.comma_separated(items) {
             return;
         }
+        let st = ListStyle {
+            comma: self.list_comma_side(items, st.comma),
+            ..st
+        };
         let item_ind = shift(comma, 2);
         match st.wrap {
             Wrap::Never if st.keep => self.comma_flat(items, anchor),
@@ -515,7 +580,7 @@ impl Builder<'_> {
                 let g = self.group(first.0, last.1, st.keep);
                 for w in items.windows(2) {
                     let (c, b) = (w[0].1 + 1, w[1].0);
-                    if st.comma == Comma::Leading && !self.l.trivia[b].has_comments() {
+                    if self.comma_side(c, b, st.comma) == Comma::Leading {
                         self.set(c, Rule::Fill(g, comma, Sp::No));
                         self.set(b, Rule::FlatIn(g, Sp::One));
                     } else {
@@ -530,10 +595,7 @@ impl Builder<'_> {
                 if st.comma == Comma::Leading {
                     self.comma_chop(items, g, comma);
                 } else {
-                    for w in items.windows(2) {
-                        self.set(w[0].1 + 1, Rule::FlatIn(g, Sp::No));
-                        self.set(w[1].0, Rule::BreakIf(g, item_ind, Sp::One));
-                    }
+                    self.trailing_chop(items, g, comma, item_ind);
                 }
             }
         }
@@ -560,6 +622,10 @@ impl Builder<'_> {
         if first.0 != open + 1 || last.1 + 1 != close || !self.comma_separated(items) {
             return;
         }
+        let st = ListStyle {
+            comma: self.list_comma_side(items, st.comma),
+            ..st
+        };
         match st.wrap {
             Wrap::Never if st.keep => {
                 self.set(first.0, Rule::Keep(Ind::Src(anchor), Sp::No));
@@ -584,7 +650,7 @@ impl Builder<'_> {
                 }
                 for w in items.windows(2) {
                     let (c, b) = (w[0].1 + 1, w[1].0);
-                    if leading {
+                    if self.comma_side(c, b, st.comma) == Comma::Leading {
                         self.set(c, Rule::Fill(g, Ind::Col(open, 0), Sp::No));
                         self.set(b, Rule::FlatIn(g, Sp::One));
                     } else {
@@ -597,20 +663,14 @@ impl Builder<'_> {
             Wrap::ChopIfLong | Wrap::Always => {
                 let g = self.group(open, close, st.keep);
                 self.l.groups[g].force = st.wrap == Wrap::Always;
-                self.set(
-                    first.0,
-                    Rule::BreakIf(g, Ind::Col(open, self.ind()), Sp::No),
-                );
+                let item_ind = self.ind().max(2);
+                self.set(first.0, Rule::BreakIf(g, Ind::Col(open, item_ind), Sp::No));
+                // Leading commas 2 left of the items, so the items line up.
+                let comma = Ind::Col(open, item_ind - 2);
                 if st.comma == Comma::Leading {
-                    self.comma_chop(items, g, Ind::Col(open, 0));
+                    self.comma_chop(items, g, comma);
                 } else {
-                    for w in items.windows(2) {
-                        self.set(w[0].1 + 1, Rule::FlatIn(g, Sp::No));
-                        self.set(
-                            w[1].0,
-                            Rule::BreakIf(g, Ind::Col(open, self.ind()), Sp::One),
-                        );
-                    }
+                    self.trailing_chop(items, g, comma, Ind::Col(open, item_ind));
                 }
                 self.set(close, Rule::BreakIf(g, Ind::Col(open, 0), Sp::No));
             }

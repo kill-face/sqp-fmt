@@ -73,11 +73,13 @@ impl Builder<'_> {
         for e in &elems {
             self.set(e.0, Rule::Break(Ind::Col(base, self.ind())));
         }
-        let leading = self.cfg.create_table.comma == Comma::Leading;
+        let configured = self.list_comma_side(&elems, self.cfg.create_table.comma);
         for w in elems.windows(2) {
             let (a, b) = (w[0], w[1]);
             if a.1 + 2 == b.0 && self.is(a.1 + 1, &Token::Comma) {
-                if leading {
+                // A comment between the comma and a neighbour keeps the
+                // comma beside the other one (`comma_side`).
+                if self.comma_side(a.1 + 1, b.0, configured) == Comma::Leading {
                     // `  , Name …`
                     self.set(a.1 + 1, Rule::Break(Ind::Col(base, self.ind() - 2)));
                     self.set(b.0, Rule::Flat(Sp::One));

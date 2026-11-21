@@ -3,8 +3,8 @@ from t
 where z in ('first value', 'second value')
 select concat(
                  FirstPartOfTheName
-             , SecondPartOfTheName
-             , ThirdPart
+               , SecondPartOfTheName
+               , ThirdPart
              ) as c
 from t
 exec dbo.DoThings @alpha = 1,

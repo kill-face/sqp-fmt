@@ -8,14 +8,14 @@ values (
           )
 insert into dbo.OrderArchive (
                                  OrderId
-                             , CustomerId
-                             , Total
-                             , CreatedAt
-                             , CreatedBy
-                             , ModifiedAt
-                             , ModifiedBy
-                             , ChangeReason
-                             , Source
+                               , CustomerId
+                               , Total
+                               , CreatedAt
+                               , CreatedBy
+                               , ModifiedAt
+                               , ModifiedBy
+                               , ChangeReason
+                               , Source
                              )
 select *
 from dbo.Orders

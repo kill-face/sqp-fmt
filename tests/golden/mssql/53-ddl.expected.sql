@@ -22,8 +22,8 @@ go
 create index IX_Widget_Name
     on dbo.Widget (
                       Name
-                  , Code
-                  , Id
+                    , Code
+                    , Id
                   ) include (Price)
 alter table dbo.Widget
     add constraint FK_A foreign key (Id) references dbo.A (Id),

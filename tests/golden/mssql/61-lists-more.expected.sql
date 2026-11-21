@@ -2,7 +2,7 @@ select x
 from t
 where y in (
                1
-           , 2
+             , 2
            )
 select concat( FirstPartOfTheName, SecondPartOfTheName
              , ThirdPartOfTheName) as c
@@ -15,7 +15,7 @@ create index IX_W
 go
 create view dbo.vW (
                        A
-                   , B
+                     , B
                    ) as
     select A, B
     from dbo.W

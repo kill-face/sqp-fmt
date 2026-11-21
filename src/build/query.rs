@@ -89,7 +89,7 @@ impl Builder<'_> {
                 && self.is(pc + 1, &Token::Comma)
                 && pc + 2 == name
             {
-                if self.cfg.cte_list.comma == Comma::Leading {
+                if self.comma_side(pc + 1, name, self.cfg.cte_list.comma) == Comma::Leading {
                     // `   , B as`
                     self.set(pc + 1, Rule::Break(Ind::LineOf(with_tok, 3)));
                     self.set(name, Rule::Flat(Sp::One));

@@ -352,15 +352,13 @@ impl Builder<'_> {
     /// a select list), or trailing commas.
     fn param_lines(&mut self, create: usize, items: &[R]) {
         let Some(first) = items.first() else { return };
-        let leading = self.cfg.routine_params.comma == Comma::Leading;
-        let mut pi = self.ind_or(self.cfg.routine_params.indent);
-        if leading {
-            // `, @name`: the comma and its space need 2 columns.
-            pi = pi.max(2);
-        }
+        let configured = self.list_comma_side(items, self.cfg.routine_params.comma);
+        // `, @name`: a leading comma and its space need 2 columns (a comment
+        // can make a comma lead even when trailing commas are configured).
+        let pi = self.ind_or(self.cfg.routine_params.indent).max(2);
         self.set(first.0, Rule::Break(Ind::Col(create, pi)));
         for w in items.windows(2) {
-            if leading {
+            if self.comma_side(w[0].1 + 1, w[1].0, configured) == Comma::Leading {
                 self.set(w[0].1 + 1, Rule::Break(Ind::Col(create, pi - 2)));
                 self.set(w[1].0, Rule::Flat(Sp::One));
             } else {

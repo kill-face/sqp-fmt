@@ -9,7 +9,7 @@ where y in (1, 2, 3)
              )
 select coalesce(
                    a
-               , b
+                 , b
                ) as c
 from t
 exec dbo.DoThings @alpha = 1
